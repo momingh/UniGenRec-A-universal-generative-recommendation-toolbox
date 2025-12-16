@@ -4,6 +4,7 @@ import torch
 import torch.optim as optim
 import os
 import pprint
+from collections import Counter
 from typing import Optional # ✅ (新增) 导入 Optional
 
 # ✅ 1. 從 torch.utils.data 直接導入 DataLoader
@@ -11,7 +12,13 @@ from torch.utils.data import DataLoader
 from dataset import GenRecDataset, item2code
 from tokenizer import get_tokenizer       
 from trainer import train_one_epoch, evaluate
-from utils import load_and_process_config, setup_logging, set_seed, get_model_class
+from utils import (
+    load_and_process_config,
+    setup_logging,
+    set_seed,
+    get_model_class,
+    load_item_category_map,
+)
 
 import sys
 from pathlib import Path
@@ -29,15 +36,18 @@ from recommendation.models.generation.prefix_tree import Trie, build_trie_from_c
 def main():
     # === 1. 解析命令列參數 ===
     parser = argparse.ArgumentParser(description="GenRec Universal Training Pipeline")
-    parser.add_argument('--model', type=str, required=True, help='模型名稱 (e.g., TIGER, GPT2, RPG)')
-    parser.add_argument('--dataset', type=str, required=True, help='数据集名稱 (e.g., Beauty)')
-    parser.add_argument('--quant_method', type=str, required=True, choices=['rkmeans', 'rvq', 'rqvae', 'opq', 'pq', 'vqvae', 'mm_rqvae'], help='量化方法')
+    parser.add_argument('--model', type=str,default="AdaDiff", help='模型名稱 (e.g., TIGER, GPT2, RPG)')
+    parser.add_argument('--dataset', type=str, default="amazon-musical-instruments-23", help='数据集名稱 (e.g., Beauty)')
+    parser.add_argument('--quant_method', type=str, default="rqvae", choices=['rkmeans', 'rvq', 'rqvae', 'opq', 'pq', 'vqvae', 'mm_rqvae'], help='量化方法')
     parser.add_argument('--embedding_modality', type=str, default='text', choices=['text', 'image', 'fused', 'lfused', 'cf'], help='量化模态类型，对应不同的 codebook (默认 text)')
+    parser.add_argument('--eval_only', default=False, help='仅加载已有模型，在测试集上直接评估')
 
     
     # ✅ (已移除) 删除了 --no_trie 命令行参数
     
     args = parser.parse_args()
+    eval_only = args.eval_only
+
 
     # === 2. 載入並處理設定檔 ===
     config = load_and_process_config(
@@ -46,7 +56,8 @@ def main():
         args.quant_method,
         embedding_modality=args.embedding_modality
     )
-
+    ckpt_override = config['save_path']
+    print(f"ckpt_override: {ckpt_override}") 
 
     # === 3. 初始化 (日誌, 隨機種子) ===
     setup_logging(config['log_path'])
@@ -65,12 +76,31 @@ def main():
     # === 5. ✅ (顺序调整) 载入 item_to_code 映射 ===
     # (必须在创建模型之前完成，因为Trie依赖它)
     logging.info("Loading item to code mapping...")
-    item_to_code_map, _ = item2code(
+    item_to_code_map, code_to_item_map = item2code(
         config['code_path'],
         config['vocab_sizes'],
         config['bases']
     )
     logging.info(f"Item to code map loaded. Total items mapped: {len(item_to_code_map)}")
+    dataset_root = Path(config['train_json']).parent
+    item_to_cate_map, cate_id_to_name = load_item_category_map(
+        dataset_root,
+        args.dataset,
+        return_cate_names=True,
+        min_items_per_cate=10,
+        max_categories=30,
+    )
+    if item_to_cate_map:
+        cate_counter = Counter(item_to_cate_map.values())
+        total = sum(cate_counter.values())
+        lines = []
+        for cid, cnt in cate_counter.most_common():
+            name = cate_id_to_name.get(cid, str(cid))
+            ratio = (cnt / total) if total else 0
+            lines.append(f"{name}: {cnt} ({ratio:.2%})")
+        logging.info("[Diversity] Category distribution:\n" + "\n".join(lines))
+    else:
+        logging.info("[Diversity] Category map is empty; skip distribution logging.")
 
     # === 6. ✅ (修改) 根据 config 构建前缀树 ===
     prefix_trie: Optional[Trie] = None
@@ -104,12 +134,28 @@ def main():
     
     # ✅ (修改) 将 config 和 prefix_trie (可能是 None) 传递给模型
     #    (我们假设 ModelClass 的 __init__ 接受 prefix_trie=None)
-    model = ModelClass(config, prefix_trie=prefix_trie) 
+    model_kwargs = {"prefix_trie": prefix_trie}
+    if args.model.upper() == "ADADIFF":
+        model_kwargs.update(
+            {
+                "item_to_code_map": item_to_code_map,
+                "code_to_item_map": code_to_item_map,
+                "item_to_cate_map": item_to_cate_map,
+            }
+        )
+    model = ModelClass(config, **model_kwargs) 
     
     model.to(device)
     logging.info(model.n_parameters)
     logging.info("=" * 50)
-    optimizer = optim.Adam(model.parameters(), lr=float(config['training_params']['lr']))
+    weight_decay = float(config['training_params'].get('weight_decay', 0.01))
+    optimizer = None
+    if not eval_only:
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=float(config['training_params']['lr']),
+            weight_decay=weight_decay
+        )
 
     # === 8. (顺序调整) 初始化模型专属的 Tokenizer ===
     logging.info(f"Initializing tokenizer for model: {args.model}")
@@ -120,42 +166,89 @@ def main():
     )
     logging.info("Tokenizer initialized.")
 
+    # 支持部分模型區分訓練/評估兩種 tokenizer
+    if isinstance(tokenizer_collate_fn, dict):
+        train_collate_fn = tokenizer_collate_fn.get('train')
+        eval_collate_fn = tokenizer_collate_fn.get('eval', train_collate_fn)
+    else:
+        train_collate_fn = tokenizer_collate_fn
+        eval_collate_fn = tokenizer_collate_fn
+
     # === 9. (顺序调整) 創建數據集與 DataLoader ===
     logging.info("Creating Datasets...")
-    train_dataset = GenRecDataset(config=config, mode='train')
-    validation_dataset = GenRecDataset(config=config, mode='valid')
-    test_dataset = GenRecDataset(config=config, mode='test')
+    if eval_only:
+        test_dataset = GenRecDataset(config=config, mode='test')
+    else:
+        train_dataset = GenRecDataset(config=config, mode='train')
+        validation_dataset = GenRecDataset(config=config, mode='valid')
+        test_dataset = GenRecDataset(config=config, mode='test')
 
     logging.info("Creating DataLoaders...")
     
     is_gpu_training = (torch.cuda.is_available() and num_workers > 0)
     loader_kwargs = {
         "num_workers": num_workers,
-        "collate_fn": tokenizer_collate_fn, # 傳入 tokenizer
+        "collate_fn": train_collate_fn, # 默認使用訓練 tokenizer
         "pin_memory": is_gpu_training,
         "persistent_workers": is_gpu_training if num_workers > 0 else False
     }
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['training_params']['batch_size'],
-        shuffle=True, 
-        **loader_kwargs
-    )
-    validation_loader = DataLoader(
-        validation_dataset,
-        batch_size=config['evaluation_params']['batch_size'],
-        shuffle=False, 
-        **loader_kwargs
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config['evaluation_params']['batch_size'],
-        shuffle=False, 
-        **loader_kwargs
-    )
+    if eval_only:
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=config['evaluation_params']['batch_size'],
+            shuffle=False, 
+            collate_fn=eval_collate_fn,
+            num_workers=num_workers,
+            pin_memory=is_gpu_training,
+            persistent_workers=is_gpu_training if num_workers > 0 else False
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config['training_params']['batch_size'],
+            shuffle=True, 
+            **loader_kwargs
+        )
+        validation_loader = DataLoader(
+            validation_dataset,
+            batch_size=config['evaluation_params']['batch_size'],
+            shuffle=False, 
+            collate_fn=eval_collate_fn,
+            num_workers=num_workers,
+            pin_memory=is_gpu_training,
+            persistent_workers=is_gpu_training if num_workers > 0 else False
+        )
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=config['evaluation_params']['batch_size'],
+            shuffle=False, 
+            collate_fn=eval_collate_fn,
+            num_workers=num_workers,
+            pin_memory=is_gpu_training,
+            persistent_workers=is_gpu_training if num_workers > 0 else False
+        )
 
-    # === 10. (顺序调整) 训练-评估循环 (已修改) ===
+    # === 10. Eval-Only 快捷路径 ===
+    if eval_only:
+        ckpt_path = Path(ckpt_override) if ckpt_override else Path(config['save_path'])
+        if not ckpt_path.is_file():
+            logging.error(f"[Eval-Only] Checkpoint not found: {ckpt_path}")
+            return
+        state_dict = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(state_dict)
+        logging.info(f"[Eval-Only] Loaded checkpoint from {ckpt_path}")
+
+        test_results = evaluate(
+            model,
+            test_loader,
+            config['evaluation_params']['topk_list'],
+            device
+        )
+        logging.info(f"[Eval-Only] Test Results: {test_results}")
+        return
+
+    # === 11. (顺序调整) 训练-评估循环 (已修改) ===
     best_ndcg = 0.0
     early_stop_counter = 0
     best_epoch = 0
@@ -214,9 +307,9 @@ def main():
                     logging.info("Early stopping triggered.")
                     break
         else:
-             logging.info(f"Skipping evaluation for Epoch {epoch_num}.")
+            logging.info(f"Skipping evaluation for Epoch {epoch_num}.")
 
-    # === 11. (顺序调整) 訓練結束總結 ===
+    # === 12. (顺序调整) 訓練結束總結 ===
     logging.info("="*50)
     logging.info("🏁 Training Finished!")
     if best_test_results:

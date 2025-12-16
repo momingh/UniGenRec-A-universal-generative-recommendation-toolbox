@@ -10,10 +10,13 @@
 
 ```bash
 # Amazon 数据集
-python download_data.py --source amazon --dataset Sports_and_Outdoors
+python download_data.py --source amazon --dataset Musical_Instruments
 
 # MovieLens 数据集
 python download_data.py --source movielens --dataset ml-1m
+
+# recbole 数据集
+python download_recbole_data.py --dataset amazon-musical-instruments-23
 ```
 
 
@@ -37,7 +40,7 @@ python download_images.py --dataset_type movielens --dataset ml-1m
 
 ```bash
 # Amazon
-python process_data.py --dataset_type amazon --dataset Sports_and_Outdoors
+python process_data.py --dataset_type amazon --dataset Musical_Instruments
 
 # MovieLens
 python process_data.py --dataset_type movielens --dataset ml-1m
@@ -50,11 +53,7 @@ python process_data.py --dataset_type movielens --dataset ml-1m
 ### 生成本地 T5 文本嵌入 (PCA 到 512d):
 
 ```bash
-python process_embedding.py \
-    --embedding_type text_local \
-    --dataset Baby \
-    --model_name_or_path sentence-transformers/sentence-t5-base \
-    --pca_dim 512
+python process_embedding.py  --embedding_type text_local --dataset Toys_and_Games  --model_name_or_path sentence-transformers/sentence-t5-base --pca_dim 512
 ```
 
 ### 生成 OpenAI API 文本嵌入:
@@ -62,7 +61,7 @@ python process_embedding.py \
 ```bash
 python process_embedding.py \
     --embedding_type text_api \
-    --dataset Baby \
+    --dataset Books \
     --sent_emb_model text-embedding-3-large \
     --pca_dim 512
 ```

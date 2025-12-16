@@ -33,10 +33,10 @@ def evaluate(model, eval_loader, topk_list: List[int], device) -> Dict[str, floa
     """
     model.eval()
     
-    # ✅ 1. 初始化字典来收集 *总和* (不再是 list)
-    total_metrics = {f'Recall@{k}': 0.0 for k in topk_list}
-    total_metrics.update({f'NDCG@{k}': 0.0 for k in topk_list})
-    total_count = 0.0 # ✅ 2. 初始化总计数
+    # ✅ 1. 初始化字典来收集 *总和* 和分母
+    total_metrics: Dict[str, float] = {}
+    metric_denoms: Dict[str, float] = {}
+    total_count = 0.0
     
     with torch.no_grad():
         for batch in tqdm(eval_loader, desc="Evaluating"):
@@ -66,12 +66,23 @@ def evaluate(model, eval_loader, topk_list: List[int], device) -> Dict[str, floa
             
             # 累加指标的总和
             for metric, value in batch_metrics.items():
-                if metric in total_metrics:
-                    total_metrics[metric] += value # 不再是 .append()
+                if metric.startswith("_valid_"):
+                    base_metric = metric[len("_valid_"):]
+                    metric_denoms[base_metric] = metric_denoms.get(base_metric, 0.0) + float(value)
+                    continue
+
+                total_metrics[metric] = total_metrics.get(metric, 0.0) + float(value)
+
+                if metric.startswith("Recall@") or metric.startswith("NDCG@"):
+                    metric_denoms[metric] = total_count
+                elif metric not in metric_denoms:
+                    metric_denoms[metric] = total_count
     
     # ✅ 5. 计算所有批次的 *真实* 平均指标 (总和 / 总计数)
-    avg_metrics = {k: v / total_count if total_count > 0 else 0.0 
-                   for k, v in total_metrics.items()}
+    avg_metrics = {}
+    for k, v in total_metrics.items():
+        denom = metric_denoms.get(k, total_count)
+        avg_metrics[k] = v / denom if denom > 0 else 0.0
     
     # 返回一个包含所有平均指标的字典
     return avg_metrics

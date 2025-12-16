@@ -1,5 +1,29 @@
+# common:
+#   device: 'cuda:0' # 'cuda:0' or 'cpu'
+#   eval_interval: 50
+
+# # --- RQ-VAE 模型配置 ---
+# rqvae:
+#   # 模型架构参数
+#   model_params:
+#     hidden_sizes: [512, 256]
+#     latent_size: 128
+#     num_levels: 3         # 基础码本层数
+#     codebook_size: 256  # 每层码本的大小 (vocab_size)
+#     dropout: 0.1
+  
+#   # 训练过程参数
+#   training_params:
+#     beta: 0.5            # commitment loss 的权重
+#     batch_size: 512
+#     epochs: 1000
+#     lr: 0.0001
+#     weight_decay: 0.0
+#     optimizer: "AdamW"
+
+
 common:
-  device: 'cuda:0' # 'cuda:0' or 'cpu'
+  device: 'cuda:0'
   eval_interval: 50
 
 # --- RQ-VAE 模型配置 ---
@@ -7,16 +31,16 @@ rqvae:
   # 模型架构参数
   model_params:
     hidden_sizes: [512, 256]
-    latent_size: 128
-    num_levels: 3         # 基础码本层数
-    codebook_size: 256  # 每层码本的大小 (vocab_size)
+    latent_size: 32           # ⬇️ 建议调小：TIGER/LLaDA 原文通常使用 32 或 64。128 维度太高，难以聚类。
+    num_levels: 4             # ⬆️ 建议增加：4层是标准配置，分担每层的压力。
+    codebook_size: 256        # 保持不变
     dropout: 0.1
-  
+
   # 训练过程参数
   training_params:
-    beta: 0.5            # commitment loss 的权重
-    batch_size: 512
-    epochs: 1000
-    lr: 0.0001
-    weight_decay: 0.0
-    optimizer: "AdamW"
+    beta: 0.25                # ⬇️ 调低：0.5 太高了，会强迫 Encoder 此时过于保守，不敢探索新 Code。
+    batch_size: 2048          # ⬆️ 调大：非常关键！512 太小，不足以覆盖 256 个 Code 的分布，导致死码。
+    epochs: 2000              # ⬆️ 增加：RQ-VAE 收敛较慢，需要更多轮次。
+    lr: 0.001                 # ⬆️ 调大：1e-4 太慢，容易陷入局部最优。建议 1e-3。
+    weight_decay: 0.0001      # ⬆️ 增加：轻微的正则化有助于防止参数数值爆炸。
+    optimizer: "AdamW"        # 推荐 AdamW

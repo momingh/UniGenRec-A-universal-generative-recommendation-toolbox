@@ -1,8 +1,4 @@
-python main.py \
-  --model_name rkmeans \
-  --dataset_name Musical_Instruments \
-  --embedding_modality cf \
-  --embedding_model sasrec
+python main.py --model_name rqvae --dataset_name amazon-musical-instruments-23 --embedding_modality text  --embedding_model sentence-t5-base
 
 # 多模态
 python main.py \

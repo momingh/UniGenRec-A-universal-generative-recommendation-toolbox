@@ -63,6 +63,117 @@ def load_meta_items_amazon(file_path, data_version):
                 continue
     return items
 
+import csv
+from tqdm import tqdm
+
+def load_item_meta_recbole(file_path, sep='\t'):
+    """
+    加载 RecBole 风格的 item 元数据文件，动态解析列名，
+    并将列名中 ':' 之后的类型信息去除。
+
+    返回:
+        items: dict
+            {
+              item_id: {
+                  field_name: value,
+                  ...
+              }
+            }
+    """
+    items = {}
+
+    with open(file_path, 'r', encoding='utf-8') as fp:
+        reader = csv.reader(fp, delimiter=sep)
+
+        # 读取表头
+        raw_header = next(reader)
+        header = [h.split(':')[0] for h in raw_header]
+
+        # 找到 item_id 列索引
+        if 'item_id' not in header:
+            raise ValueError("item metadata must contain 'item_id' column")
+
+        item_id_idx = header.index('item_id')
+
+        for row in tqdm(reader, desc="Load RecBole item meta"):
+            if not row or len(row) != len(header):
+                continue
+
+            item_id = row[item_id_idx]
+            if not item_id:
+                continue
+
+            meta = {}
+            for i, field in enumerate(header):
+                if i == item_id_idx:
+                    continue
+
+                value = row[i]
+                if value == '' or value == 'None':
+                    continue
+
+                meta[field] = value
+
+            items[item_id] = meta
+
+    return items
+
+
+def preprocess_recbole(args):
+    """
+    处理 recbole 数据集。
+    """
+    print('Process rating data: ')
+    print(' Dataset: ', args.dataset)
+
+    # 动态构造输入文件根目录
+    input_root_path = os.path.join(args.input_path, args.dataset)
+    # 动态构造 ratings 文件路径
+    rating_file_path = os.path.join(input_root_path,f'{args.dataset}.inter')
+    if not os.path.exists(rating_file_path):
+        raise FileNotFoundError(f"Ratings file not found: {rating_file_path}")
+
+    users, items, rating_inters = set(), set(), set()
+
+    with open(rating_file_path, 'r', encoding='utf-8') as fp:
+        next(fp)  # 跳过第一行（表头）
+        for line in tqdm(fp, desc='Load ratings'):
+            try:
+                user, item, rating, time = line.strip().split('\t')
+                users.add(user)
+                items.add(item)
+                rating_inters.add((user, item, float(rating), int(float(time))))
+            except ValueError:
+                continue
+
+    # 动态构造 meta 文件路径
+    meta_file_path = os.path.join(input_root_path, f'{args.dataset}.item')
+    if not os.path.exists(meta_file_path):
+        raise FileNotFoundError(f"Metadata file not found: {meta_file_path}")
+
+    # 调用 RecBole 专属的 load_item_meta_recbole
+    meta_items = load_item_meta_recbole(meta_file_path)
+
+    print('The number of raw inters: ', len(rating_inters))
+    rating_inters = make_inters_in_order(rating_inters)
+    
+    # 过滤掉没有元数据的交互
+    filtered_inters = []
+    for inter in tqdm(rating_inters, desc="Filtering interactions by meta items"):
+        if inter[1] in meta_items:
+            filtered_inters.append(inter)
+    rating_inters = filtered_inters
+    print(f"Interactions after meta filtering: {len(rating_inters)}")
+
+    # K-core 过滤
+    rating_inters = filter_inters(rating_inters, can_items=None,
+                                  user_k_core_threshold=args.user_k,
+                                  item_k_core_threshold=args.item_k)
+    
+    rating_inters = make_inters_in_order(rating_inters)
+    print('\n')
+    return rating_inters, meta_items
+
 def preprocess_amazon(args):
     """
     处理 Amazon '14 或 '18 数据集。
@@ -373,7 +484,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     
     # 新增：用于分发任务的参数
-    parser.add_argument('--dataset_type', type=str, required=True, choices=['amazon', 'movielens'],
+    parser.add_argument('--dataset_type', type=str, required=True, choices=['amazon', 'movielens','recbole'],
                         help='Type of the dataset to process (amazon or movielens)')
     
     # 通用参数
@@ -408,6 +519,8 @@ if __name__ == '__main__':
         rating_inters, meta_items = preprocess_amazon(args)
     elif args.dataset_type == 'movielens':
         rating_inters, meta_items = preprocess_movielens(args)
+    elif args.dataset_type == 'recbole':
+        rating_inters, meta_items = preprocess_recbole(args)
     else:
         raise ValueError(f"Unknown dataset_type: {args.dataset_type}")
     
@@ -436,7 +549,7 @@ if __name__ == '__main__':
     print("Total users:", len(user2index))
     print("Total items (with meta):", len(item2feature))
     print("Total items (in inters):", len(item2index))
-
+    print("Total interactions:", len(rating_inters))
     write_json_file(item2feature, os.path.join(output_dataset_path, f'{args.dataset}.item.json'))
     
     # 保存映射文件

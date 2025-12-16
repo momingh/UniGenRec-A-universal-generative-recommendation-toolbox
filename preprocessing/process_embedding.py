@@ -5,6 +5,7 @@ import os
 import sys
 import numpy as np
 import torch 
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 # ✅ (核心修改) 导入增强后的 utils.py 中的函数
 try:

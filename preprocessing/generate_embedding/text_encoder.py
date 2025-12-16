@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, AutoModel
 from openai import OpenAI 
 import os # 导入 os
 import sys # 导入 sys
-
+from sentence_transformers import SentenceTransformer
 # ✅ (核心修改) 从父目录导入共享函数
 try:
     # 添加父目录到路径
@@ -22,6 +22,7 @@ except ImportError as e:
 
 # 🚨 (移除) 不再需要在这里定义 load_json, clean_text, set_device 等
 
+# 🚨 (移除) 不再需要在这里定义 load_json, clean_text, set_device 等
 def generate_local_text(args, item_text_list) -> np.ndarray:
     """使用本地 Transformer 模型生成文本嵌入"""
     print(f"🔹 使用本地模型生成文本嵌入: {args.model_name_or_path}")
@@ -29,62 +30,71 @@ def generate_local_text(args, item_text_list) -> np.ndarray:
     # 确保 device 来自 args
     device = getattr(args, 'device', torch.device('cpu')) 
     
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True, cache_dir=args.model_cache_dir)
-    model = AutoModel.from_pretrained(args.model_name_or_path, trust_remote_code=True, cache_dir=args.model_cache_dir).to(device)
+    # 👉 SentenceTransformer 自带 tokenizer，不能再用 HF Tokenizer
+    # tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True, cache_dir=args.model_cache_dir)
+
+    # 👉 加载 SentenceTransformer（这是 encoder-only）
+    model = SentenceTransformer(args.model_name_or_path, device=str(device))
     model.eval()
     
-    # (数据准备逻辑 - 保持不变或根据需要调整)
+    # (数据准备逻辑 —— 完全保持不变)
     items, texts = zip(*item_text_list)
     max_item_id = max(items) if items else -1
     order_texts = [[""]] * (max_item_id + 1)
     for item, text in zip(items, texts):
         order_texts[item] = text if text else [""]
     for i in range(len(order_texts)):
-        if not order_texts[i]: order_texts[i] = [""] 
+        if not order_texts[i]:
+            order_texts[i] = [""]
     final_texts = [" ".join(t) for t in order_texts]
 
     embeddings = []
+
+    # ✔ SentenceTransformer 自动做 batching，不需要 HF tokenizer
     with torch.no_grad():
         for i in tqdm(range(0, len(final_texts), args.batch_size), desc="Local Text Encoding"):
             batch_texts = final_texts[i : i + args.batch_size]
-            batch_texts = [t if t.strip() else "N/A" for t in batch_texts] 
+            batch_texts = [t if t.strip() else "N/A" for t in batch_texts]
 
             try:
-                encoded = tokenizer(batch_texts, padding=True, truncation=True,
-                                    return_tensors="pt", max_length=args.max_sent_len).to(device)
-                outputs = model(**encoded)
-                attn = encoded['attention_mask'].unsqueeze(-1)
-                masked = outputs.last_hidden_state * attn
-                mean_output = masked.sum(dim=1) / attn.sum(dim=1).clamp(min=1e-9) 
-                embeddings.append(mean_output.cpu())
-            except Exception as e:
-                 print(f"\n[警告] 本地编码批次 {i//args.batch_size} 失败: {e}")
-                 # 使用 getattr 安全获取 hidden_size
-                 emb_dim = getattr(getattr(model, 'config', None), 'hidden_size', 768)
-                 embeddings.append(torch.zeros((len(batch_texts), emb_dim)))
+                # 👉 使用 SentenceTransformer 的 encode（自动 tokenizer + pooling）
+                batch_emb = model.encode(
+                    batch_texts,
+                    batch_size=len(batch_texts),
+                    convert_to_numpy=True,
+                    normalize_embeddings=False
+                )
 
-    if not embeddings: # 处理完全失败的情况
-         raise RuntimeError("未能生成任何本地文本嵌入。")
+                # 转回 torch 再 append（保持你原逻辑）
+                embeddings.append(torch.tensor(batch_emb))
+            except Exception as e:
+                print(f"\n[警告] 本地编码批次 {i//args.batch_size} 失败: {e}")
+                emb_dim = model.get_sentence_embedding_dimension()
+                embeddings.append(torch.zeros((len(batch_texts), emb_dim)))
+
+    if not embeddings:
+        raise RuntimeError("未能生成任何本地文本嵌入。")
          
     embeddings = torch.cat(embeddings, dim=0).numpy().astype(np.float32)
     
-    # 验证数量
+    # (验证数量逻辑 — 保持不变)
     if embeddings.shape[0] != len(final_texts):
-         print(f"[警告] 本地文本嵌入数量 ({embeddings.shape[0]}) 与预期 ({len(final_texts)}) 不符！")
-         # 填充或截断以匹配
-         target_len = len(final_texts)
-         current_len = embeddings.shape[0]
-         emb_dim = embeddings.shape[1]
-         if current_len < target_len: # 填充
-              print(" -> 将用零向量填充。")
-              padding = np.zeros((target_len - current_len, emb_dim), dtype=np.float32)
-              embeddings = np.concatenate([embeddings, padding], axis=0)
-         else: # 截断
-              print(" -> 将截断多余部分。")
-              embeddings = embeddings[:target_len]
+        print(f"[警告] 本地文本嵌入数量 ({embeddings.shape[0]}) 与预期 ({len(final_texts)}) 不符！")
+        target_len = len(final_texts)
+        current_len = embeddings.shape[0]
+        emb_dim = embeddings.shape[1]
+        if current_len < target_len:
+            print(" -> 将用零向量填充。")
+            padding = np.zeros((target_len - current_len, emb_dim), dtype=np.float32)
+            embeddings = np.concatenate([embeddings, padding], axis=0)
+        else:
+            print(" -> 将截断多余部分。")
+            embeddings = embeddings[:target_len]
 
     print(f"本地文本嵌入维度: {embeddings.shape}")
     return embeddings
+
+
 
 def generate_api_text(args, item_text_list) -> np.ndarray:
     """使用 OpenAI API 生成文本嵌入"""
