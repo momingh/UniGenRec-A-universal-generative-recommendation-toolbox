@@ -4,8 +4,23 @@ from typing import List, Dict, Any, Callable
 import numpy as np
 import random
 import logging
+from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
+
+SFT_PROMPT = (
+    "Below is an instruction that describes a task. "
+    "Write a response that appropriately completes the request.\n\n"
+    "### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:"
+)
+
+
+def build_semantic_special_tokens(vocab_sizes: List[int]) -> List[str]:
+    tokens = []
+    for level, vocab_size in enumerate(vocab_sizes):
+        for value in range(vocab_size):
+            tokens.append(f"<SID_{level}_{value}>")
+    return tokens
 
 class BaseTokenizer:
     """Tokenizer 基類 (保持不變)"""
@@ -305,6 +320,137 @@ class RetrievalTokenizer(BaseTokenizer):
             'target_ids': target_ids          # (B,) 0-based target
         }
 
+
+class LCRecTokenizer(BaseTokenizer):
+    """
+    Build Alpaca/SFT-style instruction data with Semantic ID special tokens.
+    """
+    def __init__(self, config: Dict[str, Any], item_to_code_map: Dict[int, List[int]], is_training: bool):
+        super().__init__(config, item_to_code_map)
+        self.is_training = is_training
+        model_params = config["model_params"]
+        model_name_or_path = model_params["model_name_or_path"]
+
+        self.llm_tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=model_params.get("trust_remote_code", False),
+        )
+        self.semantic_special_tokens = build_semantic_special_tokens(config["vocab_sizes"])
+        self.llm_tokenizer.add_special_tokens(
+            {"additional_special_tokens": self.semantic_special_tokens}
+        )
+        if self.llm_tokenizer.pad_token_id is None:
+            self.llm_tokenizer.pad_token = self.llm_tokenizer.eos_token
+
+        self.max_text_len = model_params.get("max_text_len", 512)
+        self.history_sep = model_params.get("history_sep", ", ")
+        self.add_history_prefix = model_params.get("history_add_index_prefix", False)
+        self.instruction_template = model_params.get(
+            "instruction_template",
+            "Given the user's historical interactions in chronological order: {history}\n"
+            "Predict the next item Semantic ID.",
+        )
+
+    def _format_prompt(self, instruction: str, input_text: str) -> str:
+        return SFT_PROMPT.format(instruction=instruction, input_text=input_text)
+
+    def _build_training_instance(
+        self,
+        instruction: str,
+        input_text: str,
+        response: str,
+    ) -> Dict[str, torch.Tensor]:
+        prompt_text = self._format_prompt(instruction, input_text)
+        prompt_ids = self.llm_tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+        response_ids = self.llm_tokenizer(f" {response}", add_special_tokens=False)["input_ids"]
+        eos_id = self.llm_tokenizer.eos_token_id
+
+        input_ids = prompt_ids + response_ids + [eos_id]
+        labels = [-100] * len(prompt_ids) + response_ids + [eos_id]
+
+        return {
+            "input_ids": torch.tensor(input_ids[: self.max_text_len], dtype=torch.long),
+            "labels": torch.tensor(labels[: self.max_text_len], dtype=torch.long),
+        }
+
+    def _build_eval_instance(
+        self,
+        instruction: str,
+        input_text: str,
+        target_text: str,
+        target_item_id: int,
+    ) -> Dict[str, torch.Tensor]:
+        prompt_text = self._format_prompt(instruction, input_text)
+        prompt_ids = self.llm_tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+        target_ids = self.llm_tokenizer(target_text, add_special_tokens=False)["input_ids"]
+        return {
+            "input_ids": torch.tensor(prompt_ids[: self.max_text_len], dtype=torch.long),
+            "target_token_ids": torch.tensor(target_ids, dtype=torch.long),
+            "target_item_id": torch.tensor(target_item_id, dtype=torch.long),
+        }
+
+    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        if self.is_training:
+            features = []
+            for item in batch:
+                features.append(
+                    self._build_training_instance(
+                        instruction=item["instruction"],
+                        input_text=item.get("input", ""),
+                        response=item["output"],
+                    )
+                )
+
+            input_ids = pad_sequence(
+                [feature["input_ids"] for feature in features],
+                batch_first=True,
+                padding_value=self.llm_tokenizer.pad_token_id,
+            )
+            labels = pad_sequence(
+                [feature["labels"] for feature in features],
+                batch_first=True,
+                padding_value=-100,
+            )
+            attention_mask = (input_ids != self.llm_tokenizer.pad_token_id).long()
+            labels = labels.masked_fill(input_ids == self.llm_tokenizer.pad_token_id, -100)
+            return {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+            }
+
+        eval_features = []
+        for item in batch:
+            eval_features.append(
+                self._build_eval_instance(
+                    instruction=item["instruction"],
+                    input_text=item.get("input", ""),
+                    target_text=item["output"],
+                    target_item_id=int(item["target_item"]),
+                )
+            )
+
+        input_ids = pad_sequence(
+            [feature["input_ids"] for feature in eval_features],
+            batch_first=True,
+            padding_value=self.llm_tokenizer.pad_token_id,
+        )
+        attention_mask = (input_ids != self.llm_tokenizer.pad_token_id).long()
+        target_token_ids = torch.stack(
+            [feature["target_token_ids"] for feature in eval_features],
+            dim=0,
+        )
+        target_item_ids = torch.stack(
+            [feature["target_item_id"] for feature in eval_features],
+            dim=0,
+        )
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "target_token_ids": target_token_ids,
+            "target_item_ids": target_item_ids,
+        }
+
 def get_tokenizer(model_name: str, config: Dict[str, Any], item_to_code_map: Dict[int, List[int]]) -> Callable:
     """
     (保持之前的版本不變)
@@ -314,6 +460,11 @@ def get_tokenizer(model_name: str, config: Dict[str, Any], item_to_code_map: Dic
         return {
             'train': AdaDiffTokenizer(config, item_to_code_map, is_training=True),
             'eval': AdaDiffTokenizer(config, item_to_code_map, is_training=False)
+        }
+    if model_name == 'LCREC':
+        return {
+            'train': LCRecTokenizer(config, item_to_code_map, is_training=True),
+            'eval': LCRecTokenizer(config, item_to_code_map, is_training=False)
         }
     if model_name == 'TIGER':
         return GenerativeTokenizer(config, item_to_code_map, padding_side='right')

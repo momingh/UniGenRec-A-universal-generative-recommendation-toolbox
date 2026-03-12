@@ -1,0 +1,17 @@
+model_params:
+  model_name_or_path: "Qwen/Qwen2.5-3B-Instruct"
+  trust_remote_code: false
+  max_text_len: 512
+  history_sep: ", "
+  history_add_index_prefix: false
+  instruction_template: "Given the user's historical interactions in chronological order, predict the next item Semantic ID."
+
+training_params:
+  lr: 1e-5
+  batch_size: 4
+  num_epochs: 3
+  num_workers: 4
+
+evaluation_params:
+  batch_size: 16
+  beam_size: 20

@@ -130,6 +130,9 @@ def load_and_process_config(model_name: str, dataset_name: str, quant_method: st
     config['train_json'] = dataset_root / f"{dataset_name}.train.jsonl"
     config['valid_json'] = dataset_root / f"{dataset_name}.valid.jsonl"
     config['test_json'] = dataset_root / f"{dataset_name}.test.jsonl"
+    config['train_instruction_json'] = dataset_root / f"{dataset_name}.lcrec.train.jsonl"
+    config['valid_instruction_json'] = dataset_root / f"{dataset_name}.lcrec.valid.jsonl"
+    config['test_instruction_json'] = dataset_root / f"{dataset_name}.lcrec.test.jsonl"
     _ensure_dir_exists(output_root)
 
     # === 4. 根據載入的量化細節，計算詞表參數 ===

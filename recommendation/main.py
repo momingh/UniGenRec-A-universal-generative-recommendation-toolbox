@@ -40,7 +40,7 @@ def main():
     parser.add_argument('--dataset', type=str, default="amazon-musical-instruments-23", help='数据集名稱 (e.g., Beauty)')
     parser.add_argument('--quant_method', type=str, default="rqvae", choices=['rkmeans', 'rvq', 'rqvae', 'opq', 'pq', 'vqvae', 'mm_rqvae'], help='量化方法')
     parser.add_argument('--embedding_modality', type=str, default='text', choices=['text', 'image', 'fused', 'lfused', 'cf'], help='量化模态类型，对应不同的 codebook (默认 text)')
-    parser.add_argument('--eval_only', default=False, help='仅加载已有模型，在测试集上直接评估')
+    parser.add_argument('--eval_only', action='store_true', help='仅加载已有模型，在测试集上直接评估')
 
     
     # ✅ (已移除) 删除了 --no_trie 命令行参数
@@ -143,6 +143,12 @@ def main():
                 "item_to_cate_map": item_to_cate_map,
             }
         )
+    elif args.model.upper() == "LCREC":
+        model_kwargs.update(
+            {
+                "item_to_code_map": item_to_code_map,
+            }
+        )
     model = ModelClass(config, **model_kwargs) 
     
     model.to(device)
@@ -232,12 +238,21 @@ def main():
     # === 10. Eval-Only 快捷路径 ===
     if eval_only:
         ckpt_path = Path(ckpt_override) if ckpt_override else Path(config['save_path'])
-        if not ckpt_path.is_file():
+        if args.model.upper() == "LCREC" and not ckpt_path.exists():
+            candidate_dir = ckpt_path.with_suffix("")
+            if candidate_dir.exists():
+                ckpt_path = candidate_dir
+        if not ckpt_path.exists():
             logging.error(f"[Eval-Only] Checkpoint not found: {ckpt_path}")
             return
-        state_dict = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(state_dict)
-        logging.info(f"[Eval-Only] Loaded checkpoint from {ckpt_path}")
+        if ckpt_path.is_dir() and hasattr(model, "load_pretrained"):
+            model.load_pretrained(str(ckpt_path))
+            model.to(device)
+            logging.info(f"[Eval-Only] Loaded pretrained checkpoint from {ckpt_path}")
+        else:
+            state_dict = torch.load(ckpt_path, map_location=device)
+            model.load_state_dict(state_dict)
+            logging.info(f"[Eval-Only] Loaded checkpoint from {ckpt_path}")
 
         test_results = evaluate(
             model,
@@ -297,8 +312,14 @@ def main():
                 best_val_results = val_results
                 best_test_results = test_results
 
-                torch.save(model.state_dict(), config['save_path'])
-                logging.info(f"Best model saved to {config['save_path']}")
+                if hasattr(model, "save_pretrained") and args.model.upper() == "LCREC":
+                    ckpt_dir = Path(config['save_path']).with_suffix("")
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    model.save_pretrained(str(ckpt_dir))
+                    logging.info(f"Best model saved to {ckpt_dir}")
+                else:
+                    torch.save(model.state_dict(), config['save_path'])
+                    logging.info(f"Best model saved to {config['save_path']}")
             
             else:
                 early_stop_counter += eval_interval 
