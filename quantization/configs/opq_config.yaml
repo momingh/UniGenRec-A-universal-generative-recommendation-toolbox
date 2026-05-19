@@ -1,17 +1,26 @@
-# configs/opq.yaml (統一後的版本)
+# configs/opq.yaml
 
 common:
-  device: 'cuda:0'
+  device: 'cpu'
   eval_interval: 50
+  validation_split: -1
+  seed: 42
+  num_workers: 4
+  predict_batch_size: 2048
 
 # --- OPQ 模型配置 ---
 opq:
   model_params:
-    num_levels: 32          
+    n_codebook: 32
     codebook_size: 256
-    opq_use_gpu: True
-    opq_gpu_id: 0
-    faiss_omp_num_threads: 4
-    test_size: 0.05
-    random_state: 42
+    # 是否在预测码本时追加一层去重 ID；false 时只保存 OPQ/PQ 原始 semantic codes。
     has_dup_layer: false
+    faiss_omp_num_threads: 32
+
+  training_params:
+    # OPQ 是 FAISS one-shot 拟合模型；这些字段用于兼容通用 Trainer。
+    batch_size: 2048
+    epochs: 1
+    lr: 0.0
+    weight_decay: 0.0
+    optimizer: "AdamW"

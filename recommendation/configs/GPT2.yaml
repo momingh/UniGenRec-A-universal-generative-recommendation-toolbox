@@ -1,22 +1,22 @@
-# 檔案路徑: configs/SIMPLE_GPT.yaml
+# 文件路径: configs/SIMPLE_GPT.yaml
 
-# SIMPLE_GPT 模型獨有的架構參數
+# SIMPLE_GPT 模型独有的架构参数
 model_params:
-  # max_len 來自 base.yaml，這裡可以覆蓋或不寫
+  # max_len 来自 base.yaml，這里可以覆盖或不写
   # max_len: 20       
 
-  # GPT-2 架構參數
-  n_embd: 512       # Embedding 維度
-  n_layer: 6        # Transformer 層數
-  n_head: 8         # 注意力頭的數量
-  n_inner: 2048     # FFN 層的中間維度
+  # GPT-2 架构参数
+  n_embd: 512       # Embedding 维度
+  n_layer: 6        # Transformer 层数
+  n_head: 8         # 注意力头的数量
+  n_inner: 2048     # FFN 层的中間维度
   
-  # Dropout 參數 (可選，若不寫則使用 GPT2Config 預設值)
+  # Dropout 参数 (可选，若不写则使用 GPT2Config 默认值)
   resid_pdrop: 0.1
   embd_pdrop: 0.1
   attn_pdrop: 0.1
   
-  # 其他 GPT-2 參數 (可選)
+  # 其他 GPT-2 参数 (可选)
   layer_norm_epsilon: 1e-5
   initializer_range: 0.02
 

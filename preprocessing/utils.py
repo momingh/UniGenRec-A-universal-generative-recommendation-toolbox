@@ -6,12 +6,9 @@ import re
 import time
 
 import torch
-# import gensim
 from transformers import AutoModel, AutoTokenizer
-from sklearn.preprocessing import StandardScaler
 import collections
-from typing import Any, Dict, List, Optional, Tuple
-# import openai
+from typing import Any, Dict
 
 
 
@@ -152,35 +149,26 @@ def write_remap_index(unit2index, file):
         for unit in unit2index:
             fp.write(unit + '\t' + str(unit2index[unit]) + '\n')
 
-# preprocessing/utils.py (增强版)
-
 import html
 import json
 import os
 import pickle
 import re
 import time
-import argparse # 导入 argparse 用于类型提示
-from pathlib import Path # 使用 Path 对象处理路径
-import joblib # 用于保存 PCA 模型
+import argparse
+from pathlib import Path
+import joblib
 import numpy as np
-from PIL import Image, UnidentifiedImageError
 from sklearn.decomposition import PCA
 import torch
 import collections
-# (移除不再需要的 transformers, openai 等特定库导入，这些应在各自 encoder 模块中)
-
-# ====================================================
-# ========= 核心通用函数 (来自您原有的 utils.py) =========
-# ====================================================
 
 def check_path(path):
-    """(保持不变) 确保目录存在"""
-    # 使用 Path 对象更佳
+    """确保目录存在。"""
     Path(path).mkdir(parents=True, exist_ok=True)
 
 def set_device(gpu_id: int) -> torch.device:
-    """(保持不变) 设置 PyTorch 设备"""
+    """设置 PyTorch 设备。"""
     if gpu_id < 0:
         print("[INFO] Using CPU.")
         return torch.device('cpu')
@@ -193,7 +181,7 @@ def set_device(gpu_id: int) -> torch.device:
         return torch.device('cpu')
 
 def load_json(file: str) -> Any:
-    """(保持不变) 更健壮地加载 JSON 文件"""
+    """更健壮地加载 JSON 文件。"""
     if not os.path.exists(file):
         print(f"[WARN] JSON file not found: {file}")
         return None
@@ -209,36 +197,30 @@ def load_json(file: str) -> Any:
         return None
 
 def clean_text(raw_text: Any) -> str:
-    """(保持不变) 清理文本中的 HTML 标签、换行符等"""
+    """清理文本中的 HTML 标签、换行符等。"""
     text_to_clean = ""
     if isinstance(raw_text, list):
         text_to_clean = ' '.join(str(item) for item in raw_text)
     elif isinstance(raw_text, dict):
-         # 将字典转换为 "key1: value1, key2: value2" 格式 (或根据需要调整)
         text_to_clean = ", ".join(f"{k}: {v}" for k, v in raw_text.items())
     elif isinstance(raw_text, (str, int, float)):
          text_to_clean = str(raw_text)
     else:
-         return "" # 对于无法处理的类型返回空
+         return ""
 
     try:
         cleaned_text = html.unescape(text_to_clean)
-        cleaned_text = re.sub(r'<[^>]+>', '', cleaned_text) # 移除 HTML 标签
-        cleaned_text = re.sub(r'[\n\r]+', ' ', cleaned_text) # 替换换行符为空格
-        cleaned_text = re.sub(r'\s+', ' ', cleaned_text) # 合并多个空格
-        cleaned_text = cleaned_text.replace('"', '').strip() # 移除引号并去除首尾空格
-        # (移除末尾句点逻辑，可能不需要或过于特定)
-        # index = -1 ...
+        cleaned_text = re.sub(r'<[^>]+>', '', cleaned_text)
+        cleaned_text = re.sub(r'[\n\r]+', ' ', cleaned_text)
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
+        cleaned_text = cleaned_text.replace('"', '').strip()
     except Exception as e:
-        # print(f"[WARN] Error cleaning text: {raw_text}. Error: {e}")
-        cleaned_text = "" # 出错时返回空字符串
+        cleaned_text = ""
 
-    # (移除长度限制逻辑，让调用者决定)
-    # if len(cleaned_text) >= 2000: cleaned_text = ''
     return cleaned_text
 
 def load_pickle(filename: str) -> Any:
-    """(保持不变) 加载 Pickle 文件"""
+    """加载 Pickle 文件。"""
     if not os.path.exists(filename):
          print(f"[WARN] Pickle file not found: {filename}")
          return None
@@ -250,36 +232,28 @@ def load_pickle(filename: str) -> Any:
          return None
 
 def write_json_file(dic: dict, file: str):
-    """(保持不变) 写入 JSON 文件"""
+    """写入 JSON 文件。"""
     print(f'Writing json file: {file}')
     try:
-        # 确保目录存在
         os.makedirs(os.path.dirname(file), exist_ok=True)
         with open(file, 'w', encoding='utf-8') as fp:
-            json.dump(dic, fp, indent=4, ensure_ascii=False) # 使用 ensure_ascii=False 保留非 ASCII 字符
+            json.dump(dic, fp, indent=4, ensure_ascii=False)
     except Exception as e:
          print(f"[ERROR] Failed to write JSON file {file}: {e}")
 
 def write_remap_index(unit2index: dict, file: str):
-    """(保持不变) 写入 remap 文件 (ID 映射)"""
+    """写入 remap 文件。"""
     print(f'Writing remap file: {file}')
     try:
         os.makedirs(os.path.dirname(file), exist_ok=True)
         with open(file, 'w', encoding='utf-8') as fp:
-            # 按 index 排序写入，保证一致性
             for unit, index in sorted(unit2index.items(), key=lambda item: int(item[1])):
                 fp.write(f"{unit}\t{index}\n")
     except Exception as e:
         print(f"[ERROR] Failed to write remap file {file}: {e}")
 
-# ========================================================
-# ========= 新增：用于 Embedding 生成的通用函数 =========
-# ========================================================
-
 def get_id2item_dict(item2id_file: str) -> Dict[str, str]:
-    """
-    (新增) 从 .item2id 文件加载 新ID(str) -> 原始ID(str) 的映射。
-    """
+    """从 `.item2id` 文件加载新 ID 到原始 ID 的映射。"""
     if not os.path.exists(item2id_file):
         raise FileNotFoundError(f"item2id 文件未找到: {item2id_file}")
     id2item = {}
@@ -288,178 +262,267 @@ def get_id2item_dict(item2id_file: str) -> Dict[str, str]:
             for line_num, line in enumerate(fp):
                 parts = line.strip().split("\t")
                 if len(parts) == 2:
-                    item, item_id = parts # item 是原始ID, item_id 是新ID (str)
+                    item, item_id = parts
                     id2item[item_id] = item
-                elif line.strip(): # 忽略空行，但对格式错误的行发出警告
+                elif line.strip():
                      print(f"[WARN] item2id 文件第 {line_num+1} 行格式错误: '{line.strip()}'")
         if not id2item:
             raise RuntimeError(f"未能从 {item2id_file} 加载任何 ID 映射。")
     except Exception as e:
         print(f"[ERROR] 读取 item2id 文件失败 ({item2id_file}): {e}")
-        raise # 重新抛出异常，因为这是关键数据
+        raise
     return id2item
 
+def load_review_interaction_texts(
+    review_file: str,
+    fields=("summary", "reviewText"),
+    max_chars_per_review: int = 2000,
+):
+    if not os.path.exists(review_file):
+        print(f"[WARN] review 文件不存在: {review_file}")
+        return [], []
+
+    review_texts = []
+    index_records = []
+
+    with open(review_file, "r", encoding="utf-8") as fp:
+        for line_num, line in enumerate(fp, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                print(f"[WARN] review 文件第 {line_num} 行 JSON 解析失败，已跳过。")
+                continue
+
+            parts = []
+            for field in fields:
+                value = record.get(field)
+                if value not in (None, "", [], {}):
+                    value = clean_text(str(value))
+                    if value:
+                        parts.append(value)
+            text = " ".join(parts).strip()
+            if not text:
+                text = "N/A"
+            if max_chars_per_review > 0:
+                text = text[:max_chars_per_review]
+
+            row_id = len(review_texts)
+            review_texts.append(text)
+            index_records.append({
+                "row": row_id,
+                "user": str(record.get("user", "")),
+                "item": str(record.get("item", "")),
+                "user_raw": record.get("user_raw"),
+                "item_raw": record.get("item_raw"),
+                "rating": record.get("rating"),
+                "timestamp": record.get("timestamp"),
+            })
+
+    print(f"加载 user-item review 文本: rows={len(review_texts)}, file={review_file}")
+    return review_texts, index_records
+
+
+def _rpg_list_to_str(value, remove_blank=False) -> str:
+    if isinstance(value, list):
+        ret = ", ".join(map(str, value))
+    else:
+        ret = value
+    if remove_blank:
+        ret = ret.replace(" ", "")
+    return ret
+
+
+def _rpg_clean_text(raw_text) -> str:
+    text = _rpg_list_to_str(raw_text)
+    text = text.replace("true", "True").replace("false", "False")
+    text = html.unescape(text)
+    text = text.strip()
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"[\n\t]", " ", text)
+    text = re.sub(r" +", " ", text)
+    text = re.sub(r"[^\x00-\x7F]", " ", text)
+    return text
+
+
+def _rpg_sent_process(raw) -> str:
+    sentence = ""
+    if isinstance(raw, float):
+        sentence += str(raw)
+        sentence += "."
+    elif isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
+        for values in raw:
+            for value in values:
+                sentence += _rpg_clean_text(value)[:-1]
+                sentence += ", "
+        sentence = sentence[:-2]
+        sentence += "."
+    elif isinstance(raw, list):
+        for value in raw:
+            sentence += _rpg_clean_text(value)
+    elif raw is not None:
+        sentence = _rpg_clean_text(raw)
+    return sentence + " "
+
+
+def build_rpg_sentence_text(meta_data: Dict) -> str:
+    features_needed = [
+        "title", "price", "brand",
+        "feature", "categories", "description",
+    ]
+    meta_sentence = ""
+    keys = set(meta_data.keys())
+    for feature in features_needed:
+        if feature in keys:
+            meta_sentence += _rpg_sent_process(meta_data[feature])
+    return meta_sentence
+
+
 def build_text_map(args: argparse.Namespace, id2item: Dict[str, str], item_meta: Dict[str, Dict]) -> Dict[str, str]:
-    """
-    (新增) 根据 dataset_type 从 item_meta 构建 原始ID(str) -> 清理后文本(str) 的映射。
-    """
+    """根据 `dataset_type` 从 `item_meta` 构建文本映射。"""
     if not item_meta:
          print("[WARN] item_meta 为空，无法构建 text_map。")
          return {}
 
-    # 根据 dataset_type 选择字段
+    text_format = getattr(args, "text_format", "unigenrec")
+    if args.dataset_type == "amazon" and text_format == "rpg_sentence":
+        print("将使用 RPG metadata.sentence 兼容格式构建 item 文本。")
+        text_map = {}
+        missing_meta_count = 0
+        for new_id_str, orig_id in id2item.items():
+            meta_data = item_meta.get(new_id_str)
+            if not meta_data:
+                missing_meta_count += 1
+                text_map[orig_id] = "N/A"
+                continue
+            text = build_rpg_sentence_text(meta_data)
+            text_map[orig_id] = text if text.strip() else "N/A"
+        if missing_meta_count > 0:
+            print(f"[WARN] {missing_meta_count} 个 item 在 item.json 中缺少元数据。")
+        return text_map
+
     features = []
     if args.dataset_type == 'movielens':
-        features = ['title', 'description', 'genres', 'year'] # 添加 year
+        features = [('title',), ('description',), ('genres',), ('year',)]
     elif args.dataset_type == 'amazon':
-        features = ['title', 'description', 'brand', 'categories']
+        features = [
+            ('title_text', 'title'),
+            ('price_text', 'price'),
+            ('brand_text', 'brand'),
+            ('feature_text', 'feature'),
+            ('categories_text', 'categories', 'category'),
+            ('description_text', 'description'),
+        ]
     else:
         print(f"[WARN] 未知的 dataset_type: {args.dataset_type}，将尝试使用通用字段 ['title', 'description']")
-        features = ['title', 'description']
+        features = [('title',), ('description',)]
 
-    print(f"将使用以下元数据字段构建文本: {features}")
+    feature_names = [" / ".join(group) for group in features]
+    print(f"将使用以下元数据字段构建文本: {feature_names}")
     text_map = {}
     missing_meta_count = 0
-    
-    # 遍历 id2item 来确保我们只处理有效的 item
+
     for new_id_str, orig_id in id2item.items():
-        # item_meta 的键是新ID(str)
-        meta_data = item_meta.get(new_id_str) 
+        meta_data = item_meta.get(new_id_str)
         if not meta_data:
              missing_meta_count += 1
-             text_map[orig_id] = "N/A" # 或者 ""
+             text_map[orig_id] = "N/A"
              continue
 
         parts = []
-        for f in features:
-            if f in meta_data:
-                val = meta_data[f]
-                # 对列表特殊处理 (例如 genres)
-                if isinstance(val, list):
-                    val = ", ".join(clean_text(str(x)) for x in val if str(x).strip()) # 清理列表元素
-                else:
-                    val = clean_text(str(val)) # 清理普通字段
-                
-                if val: # 只添加非空字段
-                    # 可以考虑添加字段名前缀，例如 "Title: ... Brand: ..."
-                    # parts.append(f"{f.capitalize()}: {val}") 
-                    parts.append(val)
-                    
+        for field_group in features:
+            val = None
+            for field_name in field_group:
+                candidate = meta_data.get(field_name)
+                if candidate not in (None, "", [], {}):
+                    val = candidate
+                    break
+
+            if val is None:
+                continue
+
+            if isinstance(val, list):
+                val = ", ".join(clean_text(str(x)) for x in val if str(x).strip())
+            else:
+                val = clean_text(str(val))
+
+            if val:
+                parts.append(val)
+
         text = " ".join(parts).strip()
-        text_map[orig_id] = text if text else "N/A" # 保证至少是 "N/A"
+        text_map[orig_id] = text if text else "N/A"
 
     if missing_meta_count > 0:
          print(f"[WARN] {missing_meta_count} 个 item 在 item.json 中缺少元数据。")
-         
+
     return text_map
 
-def find_first_image_path(original_item_id: str, images_info: Dict[str, List[str]], image_dir: str) -> Optional[str]:
-    """(新增) 为给定 item 查找第一个存在的图像文件路径"""
-    if not images_info: return None # 如果 images_info 未加载则返回 None
-    
-    names = images_info.get(original_item_id, [])
-    if not isinstance(names, list): names = []
-    
-    for name in names:
-        if not isinstance(name, str) or not name: continue
-        # 考虑路径分隔符问题，使用 os.path.join
-        fp = os.path.join(image_dir, name)
-        # 检查文件是否存在且非空
-        if os.path.exists(fp) and os.path.getsize(fp) > 0: 
-            return fp
-    return None # 未找到或所有文件都无效
+def find_first_image_path(original_item_id: str, images_info: Dict, image_dir: str):
+    """为给定 item 查找第一个存在且非空的图像文件路径。"""
+    if not images_info or not image_dir:
+        return None
 
-def load_pil_image(img_path: Optional[str]) -> Optional[Image.Image]:
-    """(新增) 安全地加载 PIL 图像，失败时返回 None"""
-    if img_path is None: return None
+    names = images_info.get(original_item_id, [])
+    if not isinstance(names, list):
+        names = []
+
+    for name in names:
+        if not isinstance(name, str) or not name:
+            continue
+        fp = os.path.join(image_dir, name)
+        if os.path.exists(fp) and os.path.getsize(fp) > 0:
+            return fp
+    return None
+
+def load_pil_image(img_path: str):
+    """安全加载 PIL 图像，失败时返回 None。"""
+    if img_path is None:
+        return None
     try:
+        from PIL import Image, UnidentifiedImageError
+
         img = Image.open(img_path)
-        # 确保是 RGB 格式
         if img.mode != 'RGB':
-             img = img.convert('RGB')
+            img = img.convert('RGB')
         return img
-    except (UnidentifiedImageError, FileNotFoundError, OSError, Exception) as e: 
-        # print(f"[WARN] Failed to load image {os.path.basename(img_path)}: {e}") # 可能打印过多
+    except (UnidentifiedImageError, FileNotFoundError, OSError, Exception):
         return None
 
 def build_output_path(args: argparse.Namespace, modality_tag: str, model_tag: str) -> str:
-    """(新增) 构建标准化的 embedding 输出路径"""
+    """构建标准化的 embedding 输出路径。"""
     emb_dir = os.path.join(args.save_root, args.dataset, "embeddings")
-    check_path(emb_dir) # 使用 check_path 确保目录存在
-    
-    # 清理 model_tag 中的非法字符
+    check_path(emb_dir)
+
     safe_model_tag = model_tag.split('/')[-1].replace('/', '-').replace('\\', '-')
-    
+
     filename = f"{args.dataset}.emb-{modality_tag}-{safe_model_tag}.npy"
     return os.path.join(emb_dir, filename)
 
 def apply_pca_and_save(original_embeddings: np.ndarray, args: argparse.Namespace, output_path: str) -> str:
-    """
-    (修改版) 对 embeddings 应用 PCA 并保存。
-    如果 pca_dim > 0，则同时保存原始文件和 PCA 降维后的 .npy 文件。
-    不再保存 .pca 和 .scaler 模型文件。
-    返回最终使用的文件路径（PCA 后的路径，如果执行了 PCA）。
-    """
-    pca_dim = getattr(args, 'pca_dim', 0) 
+    """对 embeddings 应用 PCA 并保存。"""
+    pca_dim = getattr(args, 'pca_dim', 0)
 
     if not isinstance(original_embeddings, np.ndarray) or original_embeddings.size == 0:
-         print("[ERROR] 输入的 embeddings 无效，无法进行 PCA 或保存。")
-         return "" 
+        return ""
 
-    # --- 情况 1 & 2: 不执行 PCA 或无法执行 ---
-    if pca_dim <= 0 or original_embeddings.shape[1] <= pca_dim:
-        if pca_dim <= 0:
-            print("pca_dim <= 0，跳过 PCA。")
-        else:
-            print(f"原始维度 ({original_embeddings.shape[1]}) <= 目标维度 ({pca_dim})，跳过 PCA。")
-        
-        try:
-            np.save(output_path, original_embeddings)
-            print(f"✅ 原始嵌入已保存至: {output_path} (维度: {original_embeddings.shape})")
-            return output_path # 返回原始路径
-        except Exception as e:
-            print(f"[ERROR] 保存原始嵌入失败 ({output_path}): {e}")
-            return "" 
-
-    # --- 情况 3: 执行 PCA ---
-    print(f"\n应用 PCA 降维，目标维度: {pca_dim}")
     try:
-        # ✅ 第一步：先保存原始文件
         np.save(output_path, original_embeddings)
-        print(f"✅ 原始嵌入已保存至: {output_path} (维度: {original_embeddings.shape})")
+        print(f"Saved embeddings: {output_path} {original_embeddings.shape}")
 
-        # ✅ 第二步：执行 PCA
-        pca = PCA(n_components=pca_dim, svd_solver="auto", random_state=42)
-        print("  -> 标准化数据 (StandardScaler)...")
-        scaler = StandardScaler()
-        scaled_embeddings = scaler.fit_transform(original_embeddings)
-        
-        print(f"  -> 执行 PCA (n_components={pca_dim})...")
-        reduced_emb = pca.fit_transform(scaled_embeddings).astype(np.float32)
-        kept_variance = float(np.sum(pca.explained_variance_ratio_))
+        if pca_dim <= 0 or original_embeddings.shape[1] <= pca_dim:
+            return output_path
 
-        # ✅ 第三步：构建 PCA 向量文件路径
-        output_path_obj = Path(output_path)
-        base = output_path_obj.with_suffix("") # 去掉 .npy
+        pca = PCA(n_components=pca_dim, whiten=True, random_state=42)
+        reduced_emb = pca.fit_transform(original_embeddings).astype(np.float32)
+
+        base = Path(output_path).with_suffix("")
         pca_vec_path_str = f"{base}-pca{pca_dim}.npy"
-        
-        # 🚨 (移除) pca_model_path_str = f"{base}-pca{pca_dim}.pca"
-        # 🚨 (移除) scaler_model_path_str = f"{base}-pca{pca_dim}.scaler"
-
-        # ✅ 第四步：保存 PCA 向量文件
         np.save(pca_vec_path_str, reduced_emb)
-        
-        # 🚨 (移除) joblib.dump(pca, pca_model_path_str)
-        # 🚨 (移除) joblib.dump(scaler, scaler_model_path_str) 
-
-        print(f"✅ PCA 向量已保存: {pca_vec_path_str}  形状={reduced_emb.shape}  保留方差={kept_variance:.4f}")
-        # 🚨 (移除) print(f"✅ PCA 模型已保存: ...")
-        # 🚨 (移除) print(f"✅ Scaler 模型已保存: ...")
-        
-        # ✅ 第五步：返回 PCA 降维后的文件路径
-        return pca_vec_path_str 
+        print(f"Saved PCA embeddings: {pca_vec_path_str} {reduced_emb.shape}")
+        return pca_vec_path_str
 
     except Exception as e:
-        print(f"[ERROR] PCA 失败: {e}")
-        print(f"PCA 失败，但原始嵌入可能已保存至: {output_path}")
-        return output_path if os.path.exists(output_path) else ""
+        print(f"[ERROR] Failed to save embeddings: {e}")
+        return ""

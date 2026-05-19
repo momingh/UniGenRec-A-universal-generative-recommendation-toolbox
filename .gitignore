@@ -20,8 +20,10 @@ __pycache__/
 *.pt
 *.pth
 *.bin
+*.safetensors
 *.h5
 *.npz
+preprocessing/emb_llm/Qwen3-Embedding-8B/
 
 # HuggingFace transformers cache
 cache/

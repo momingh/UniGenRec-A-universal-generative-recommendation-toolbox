@@ -1,6 +1,6 @@
-# 檔案路徑: configs/RPG.yaml
+# 文件路径: configs/RPG.yaml
 
-# RPG 模型獨有的架構參數
+# RPG 模型独有的架构参数
 model_params:
   max_len: 50
   n_embd: 448
@@ -13,12 +13,16 @@ model_params:
   attn_pdrop: 0.5
   layer_norm_epsilon: 1e-12
   initializer_range: 0.02
-  temperature: 0.07
+  temperature: 0.03
 
-# ✨ 範例：如果 RPG 需要不同的 batch size，可以在這裡覆蓋 base.yaml
+# ✨ 范例：如果 RPG 需要不同的 batch size，可以在这里覆盖 base.yaml
 training_params:
-  batch_size: 2048
-  lr: 0.001
+  batch_size: 256
+  lr: 0.01
+  weight_decay: 0.0
+  scheduler: cosine
+  warmup_steps: 10000
+  max_grad_norm: 1.0
 
 evaluation_params:
-  batch_size: 512 # 評估時的 batch size
+  batch_size: 512 # 评估时的 batch size

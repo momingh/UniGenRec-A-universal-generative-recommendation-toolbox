@@ -1,0 +1,28 @@
+common:
+  device: 'cpu'
+  eval_interval: 50
+  validation_split: -1
+  seed: 42
+  num_workers: 4
+  predict_batch_size: 2048
+
+rqkmeans:
+  model_params:
+    # Residual K-Means 层数；最终每个 item 得到 num_levels 个 code。
+    num_levels: 4
+    # Trainer 去重层使用的兼容字段；当前要求每层 codebook 大小一致。
+    codebook_size: 256
+    # 每层 FAISS ResidualQuantizer codebook 的大小；必须是 2 的幂。
+    codebook_sizes: [256, 256, 256, 256]
+    # 是否在预测码本时追加一层去重 ID。
+    has_dup_layer: true
+    # 是否打印 FAISS ResidualQuantizer 训练信息。
+    faiss_verbose: true
+
+  training_params:
+    # RQKMEANS 只在 __init__ 中用 FAISS 初始化 codebook，不做后续梯度训练。
+    batch_size: 2048
+    epochs: 1
+    lr: 0.0
+    weight_decay: 0.0
+    optimizer: 'AdamW'

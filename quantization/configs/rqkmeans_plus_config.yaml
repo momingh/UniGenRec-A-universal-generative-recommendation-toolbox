@@ -1,0 +1,48 @@
+common:
+  device: 'cuda:0'
+  eval_interval: 50
+  validation_split: -1
+  seed: 42
+  num_workers: 4
+  predict_batch_size: 2048
+
+rqkmeans_plus:
+  model_params:
+    # RQ-KMeans+ 要求 latent_size == 输入 embedding 维度；null 表示自动使用 input_size。
+    latent_size: null
+    # 残差修正网络 f(x) 的隐藏层；encoder 输出为 z = x + f(x)。
+    hidden_sizes: [512, 256]
+    # 残差量化层数；最终每个 item 得到 num_levels 个 code。
+    num_levels: 4
+    # Trainer 去重层使用的兼容字段；当前要求每层 codebook 大小一致。
+    codebook_size: 256
+    # 每层 RQ codebook 的大小；长度必须等于 num_levels，每个值必须是 2 的幂。
+    codebook_sizes: [256, 256, 256, 256]
+    # 是否在预测码本时追加一层去重 ID。
+    has_dup_layer: true
+    # 可选：MiniOneRec 风格的 .npz 文件，键名为 codebook_0、codebook_1、...
+    # 为空时直接用当前 item_embeddings 训练 FAISS ResidualQuantizer 做 warm-start。
+    pretrained_codebook_path: null
+    # 是否打印 FAISS ResidualQuantizer 训练信息。
+    faiss_verbose: true
+    # MLP 中 Linear 层前的 dropout 概率。
+    dropout: 0.0
+    # 是否在隐藏层使用 BatchNorm1d。
+    bn: false
+    # Sinkhorn 分配 epsilon；0 表示使用 argmin 最近邻。
+    sk_epsilons: [0.0, 0.0, 0.0, 0.0]
+    # Sinkhorn 分配迭代次数。
+    sk_iters: 100
+
+  training_params:
+    # VQ commitment loss 权重。
+    beta: 0.25
+    # 重构损失类型：mse 或 l1。
+    loss_type: "mse"
+    # 总损失 = 重构损失 + quant_loss_weight * 量化损失。
+    quant_loss_weight: 1.0
+    batch_size: 2048
+    epochs: 2000
+    lr: 0.0001
+    weight_decay: 0.0
+    optimizer: "AdamW"

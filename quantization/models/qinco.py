@@ -1,0 +1,210 @@
+import torch
+from torch import nn
+
+from .common.model_utils import (
+    assign_batch_multiple,
+    assign_to_codebook,
+    copy_codebooks_to_embeddings,
+    get_faiss_rq_codebooks,
+)
+
+
+class QINCoStep(nn.Module):
+    """Single neural residual quantization step used by QINCo."""
+
+    def __init__(self, d, K, L, h):
+        super().__init__()
+
+        self.d, self.K, self.L, self.h = d, K, L, h
+        self.codebook = nn.Embedding(K, d)
+        self.MLPconcat = nn.Linear(2 * d, d)
+
+        self.residual_blocks = nn.ModuleList(
+            nn.Sequential(
+                nn.Linear(d, h, bias=False),
+                nn.ReLU(),
+                nn.Linear(h, d, bias=False),
+            )
+            for _ in range(L)
+        )
+
+    def decode(self, xhat, codes):
+        zqs = self.codebook(codes)
+        concat = torch.cat((zqs, xhat), dim=1)
+        zqs = zqs + self.MLPconcat(concat)
+
+        for residual_block in self.residual_blocks:
+            zqs = zqs + residual_block(zqs)
+
+        return zqs
+
+    def encode(self, xhat, x):
+        """
+        参数：
+            xhat (torch.Tensor): 当前重构向量 (batch_size, d)
+            x (torch.Tensor): 目标向量 (batch_size, d)
+        """
+        zqs = self.codebook.weight
+        K, d = zqs.shape
+        batch_size = xhat.shape[0]
+
+        zqs_r = zqs.repeat(batch_size, 1, 1).reshape(batch_size * K, d)
+        xhat_r = (
+            xhat.reshape(batch_size, 1, d)
+            .repeat(1, K, 1)
+            .reshape(batch_size * K, d)
+        )
+
+        concat = torch.cat((zqs_r, xhat_r), dim=1)
+        zqs_r = zqs_r + self.MLPconcat(concat)
+
+        for residual_block in self.residual_blocks:
+            zqs_r = zqs_r + residual_block(zqs_r)
+
+        candidates = zqs_r.reshape(batch_size, K, d) + xhat.reshape(batch_size, 1, d)
+        codes, xhat_next = assign_batch_multiple(x, candidates)
+
+        return codes, xhat_next - xhat
+
+
+class QINCO(nn.Module):
+    """
+    QINCo neural residual vector quantizer.
+
+    The first level uses a standard learnable codebook. Later levels use
+    QINCoStep modules that condition each residual code contribution on the
+    current reconstruction.
+    """
+
+    def __init__(self, config: dict, input_size: int, item_embeddings=None):
+        super().__init__()
+
+        model_cfg = config["qinco"]
+        model_params = model_cfg["model_params"]
+
+        d = int(input_size)
+        K = int(model_params["codebook_size"])
+        L = int(model_params["num_residual_blocks"])
+        M = int(model_params["num_levels"])
+        h = int(model_params["hidden_size"])
+        codebook_sizes = [
+            int(size)
+            for size in model_params.get("codebook_sizes", [K] * M)
+        ]
+        faiss_init = bool(model_params.get("faiss_init", True))
+        faiss_verbose = bool(model_params.get("faiss_verbose", True))
+
+        if M <= 0:
+            raise ValueError("QINCo num_levels must be positive.")
+        if K <= 0:
+            raise ValueError("QINCo codebook_size must be positive.")
+        if L < 0:
+            raise ValueError("QINCo num_residual_blocks cannot be negative.")
+        if h <= 0:
+            raise ValueError("QINCo hidden_size must be positive.")
+        if len(codebook_sizes) != M:
+            raise ValueError("QINCo codebook_sizes must have the same length as num_levels.")
+        if any(size != K for size in codebook_sizes):
+            raise ValueError("QINCo currently requires every codebook_sizes entry to equal codebook_size.")
+        if faiss_init and item_embeddings is None:
+            raise ValueError("QINCo requires item_embeddings for FAISS initialization.")
+
+        self.config = config
+        self.d, self.K, self.L, self.M, self.h = d, K, L, M, h
+        self.loss_weights = model_params.get("loss_weights")
+
+        self.codebook0 = nn.Embedding(K, d)
+        self.steps = nn.ModuleList(
+            QINCoStep(d, K, L, h)
+            for _ in range(1, M)
+        )
+
+        if faiss_init:
+            self._init_codebooks_from_faiss(
+                item_embeddings=item_embeddings,
+                codebook_sizes=codebook_sizes,
+                verbose=faiss_verbose,
+            )
+
+    def _init_codebooks_from_faiss(self, item_embeddings, codebook_sizes, verbose):
+        codebooks = get_faiss_rq_codebooks(
+            item_embeddings,
+            codebook_sizes=codebook_sizes,
+            verbose=verbose,
+        )
+
+        qinco_codebooks = [self.codebook0] + [step.codebook for step in self.steps]
+        copy_codebooks_to_embeddings(codebooks, qinco_codebooks, label="QINCo")
+
+    def decode(self, codes):
+        xhat = self.codebook0(codes[:, 0])
+
+        for idx, step in enumerate(self.steps):
+            xhat = xhat + step.decode(xhat, codes[:, idx + 1])
+
+        return xhat
+
+    def encode(self, xs, code0=None):
+        batch_size = xs.shape[0]
+        codes = torch.zeros(batch_size, self.M, dtype=torch.long, device=xs.device)
+
+        if code0 is None:
+            code0 = assign_to_codebook(xs, self.codebook0.weight)
+
+        codes[:, 0] = code0
+        xhat = self.codebook0.weight[code0]
+
+        for idx, step in enumerate(self.steps):
+            codes[:, idx + 1], to_add = step.encode(xhat, xs)
+            xhat = xhat + to_add
+
+        return codes, xhat
+
+    def forward(self, xs, code0=None):
+        with torch.no_grad():
+            codes, _ = self.encode(xs, code0=code0)
+
+        losses = torch.zeros(self.M, device=xs.device)
+
+        xhat = self.codebook0(codes[:, 0])
+        losses[0] = (xhat - xs).pow(2).sum()
+
+        for idx, step in enumerate(self.steps):
+            xhat = xhat + step.decode(xhat, codes[:, idx + 1])
+            losses[idx + 1] = (xhat - xs).pow(2).sum()
+
+        return codes, xhat, losses
+
+    @torch.no_grad()
+    def get_codes(self, xs):
+        codes, _ = self.encode(xs)
+        return codes
+
+    def compute_loss(self, outputs=None, *args, batch_data=None, xs=None, **kwargs):
+        if outputs is None:
+            raise ValueError("QINCo.compute_loss requires forward outputs.")
+        if not isinstance(outputs, (tuple, list)) or len(outputs) < 3:
+            raise ValueError("QINCo outputs must contain codes, xhat, and losses.")
+
+        _, xhat, losses = outputs[:3]
+        target = xs if xs is not None else batch_data
+        if target is None:
+            raise ValueError("QINCo.compute_loss requires batch_data or xs.")
+
+        normalizer = max(int(target.numel()), 1)
+        if self.loss_weights is not None:
+            weights = torch.as_tensor(self.loss_weights, dtype=losses.dtype, device=losses.device)
+            if weights.numel() != losses.numel():
+                raise ValueError("QINCo loss_weights must have length num_levels.")
+            loss_total = (losses * weights).sum() / normalizer
+        else:
+            loss_total = losses.sum() / normalizer
+
+        loss_recon = (xhat - target).pow(2).mean()
+        return {
+            "loss_total": loss_total,
+            "loss_recon": loss_recon,
+        }
+
+
+QINCo = QINCO

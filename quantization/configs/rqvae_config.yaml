@@ -25,22 +25,55 @@
 common:
   device: 'cuda:0'
   eval_interval: 50
+  validation_split: -1
+  seed: 42
+  num_workers: 4
+  predict_batch_size: 2048
 
 # --- RQ-VAE 模型配置 ---
 rqvae:
   # 模型架构参数
   model_params:
+    # Encoder/Decoder 的隐藏层维度；输入 embedding 会先经过 512、256 两层再映射到 latent_size。
     hidden_sizes: [512, 256]
-    latent_size: 32           # ⬇️ 建议调小：TIGER/LLaDA 原文通常使用 32 或 64。128 维度太高，难以聚类。
-    num_levels: 4             # ⬆️ 建议增加：4层是标准配置，分担每层的压力。
-    codebook_size: 256        # 保持不变
+    # 量化前的隐向量维度，也是每个 code 向量的维度；越大表达力越强，但聚类更难。
+    latent_size: 32
+    # 残差量化层数；最终每个 item 会得到 num_levels 个离散 code。
+    num_levels: 8
+    # 每一层 codebook 的大小；最终每层 code 的取值范围是 0 到 codebook_size-1。
+    codebook_size: 256
+    # 是否在预测码本时追加一层去重 ID；用于区分基础 code 完全相同的 item。
+    has_dup_layer: true
+    # MLP 中 Linear 层前的 dropout 概率；越大正则越强，但可能欠拟合。
     dropout: 0.1
+    # 是否在隐藏层使用 BatchNorm1d；小 batch 或分布变化大时可能不稳定。
+    bn: false
+    # 是否用 KMeans 初始化每层 codebook；true 通常更稳，但首次训练会增加初始化耗时。
+    kmeans_init: true
+    # KMeans 初始化的迭代次数，仅当 kmeans_init=true 时生效。
+    kmeans_iters: 200
+    # 每个量化层使用 Sinkhorn 分配时的 epsilon；长度必须等于 num_levels，0 表示退化为 argmin 最近邻。
+    sk_epsilons: [0.0, 0.0, 0.0,0.0, 0.0, 0.0,0.0, 0.0]
+    # Sinkhorn 分配的迭代次数，仅当对应层 sk_epsilon > 0 时实际影响分配。
+    sk_iters: 100
 
   # 训练过程参数
   training_params:
-    beta: 0.25                # ⬇️ 调低：0.5 太高了，会强迫 Encoder 此时过于保守，不敢探索新 Code。
-    batch_size: 2048          # ⬆️ 调大：非常关键！512 太小，不足以覆盖 256 个 Code 的分布，导致死码。
-    epochs: 2000              # ⬆️ 增加：RQ-VAE 收敛较慢，需要更多轮次。
-    lr: 0.001                 # ⬆️ 调大：1e-4 太慢，容易陷入局部最优。建议 1e-3。
-    weight_decay: 0.0001      # ⬆️ 增加：轻微的正则化有助于防止参数数值爆炸。
-    optimizer: "AdamW"        # 推荐 AdamW
+    # VQ commitment loss 权重；越大越强制 encoder 输出贴近选中的 code 向量。
+    beta: 0.25
+    # 重构损失类型；mse_l2 使用每个 item 的平方 L2，适合高维单位向量 embedding。
+    # 对 3072 维 text-embedding-3-large，按维度平均的 mse 会让“输出全局均值”也得到很小 loss，容易码本坍塌。
+    loss_type: "mse_l2"
+    # 量化损失在总 loss 中的权重；mse_l2 已按 item 聚合，量化项需要相应降低权重。
+    quant_loss_weight: 0.1
+    # 每个训练 batch 的 item embedding 数量；越大越能覆盖 codebook，但显存占用越高。
+    batch_size: 2048
+    # 完整遍历训练集的次数；mse_l2 下通常数百轮即可稳定，过长会浪费训练时间。
+    epochs: 2000
+    # 优化器学习率；过大可能震荡，过小收敛慢。
+    lr: 0.001
+    # AdamW 的权重衰减系数；用于限制参数过大，过高会削弱拟合能力。
+    weight_decay: 0.0001
+    # torch.optim 中的优化器类名；Trainer 会用 getattr(torch.optim, optimizer) 创建。
+    optimizer: "AdamW"
+    # pca_dim: 512

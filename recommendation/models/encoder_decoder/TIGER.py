@@ -73,20 +73,20 @@ class TIGER(AbstractModel):
 
   def forward(self, batch: Dict) -> Dict:
         """
-        【已修正】此版本會先從通用的 batch 中，只挑選出 T5 模型需要的參數，
-        然後再進行傳遞，以避免 TypeError。
+        【已修正】此版本会先从通用的 batch 中，只挑选出 T5 模型需要的参数，
+        然后再進行传递，以避免 TypeError。
         """
-        # 1. 定義 T5 模型在訓練時認識的參數名稱
+        # 1. 定义 T5 模型在训练时认识的参数名称
         t5_known_args = {
             'input_ids', 
             'attention_mask', 
             'labels'
         }
         
-        # 2. 建立一個只包含 T5 認識參數的新字典
+        # 2. 建立一个只包含 T5 认识参数的新字典
         t5_inputs = {key: value for key, value in batch.items() if key in t5_known_args}
         
-        # 3. 將這個「乾淨」的字典傳遞給 T5 模型
+        # 3. 将這个「干净」的字典传递給 T5 模型
         return self.t5(**t5_inputs)
 
   # ✅ 关键修改 3: generate 函数注入 prefix_trie_fn
@@ -152,19 +152,19 @@ class TIGER(AbstractModel):
   @staticmethod
   def _calculate_pos_index(preds: torch.Tensor, labels: torch.Tensor, maxk: int) -> torch.Tensor:
         """
-        【與 TIGER 共享的評估邏輯】
-        假設 code 總是包含 L-1 個語義層和最後 1 個重複層。
+        【与 TIGER 共享的评估逻辑】
+        假设 code 总是包含 L-1 个语义层和最后 1 个重复层。
         """
         preds = preds.detach().cpu()
         labels = labels.detach().cpu()
         B, _, L_pred = preds.shape
         L_label = labels.shape[1]
 
-        # 如果生成長度不足（例如提前遇到 EOS），用 padding 補齊
+        # 如果生成长度不足（例如提前遇到 EOS），用 padding 补齐
         if L_pred < L_label:
             padding = torch.zeros((B, maxk, L_label - L_pred), dtype=preds.dtype)
             preds = torch.cat([preds, padding], dim=2)
-        # 如果生成長度過長，截斷
+        # 如果生成长度过长，截断
         elif L_pred > L_label:
             preds = preds[:, :, :L_label]
         

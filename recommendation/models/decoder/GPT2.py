@@ -6,18 +6,18 @@ import transformers
 from ..abstract_model import AbstractModel
 import sys
 from pathlib import Path
-# 確保 metrics 模組可以被正確導入
+# 确保 metrics 模块可以被正确导入
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from metrics import recall_at_k, ndcg_at_k
 
-# 從 transformers 導入 GPT-2 相關的配置和模型
+# 从 transformers 导入 GPT-2 相关的配置和模型
 GPT2Config = transformers.GPT2Config
 GPT2LMHeadModel = transformers.GPT2LMHeadModel
 
 class GPT2(AbstractModel):
     """
-    一個仿照 TIGER 介面的 Decoder-Only 生成式模型。
-    它使用 GPT-2 架構從零開始訓練，專用於序列推薦任務。
+    一个仿照 TIGER 接口的 Decoder-Only 生成式模型。
+    它使用 GPT-2 架构从零开始训练，专用於序列推荐任务。
     """
     def __init__(self, config: Dict[str, Any], **kwargs):
         super().__init__(config)
@@ -25,10 +25,10 @@ class GPT2(AbstractModel):
         model_params = config['model_params']
         token_params = config['token_params']
 
-        # 1. 創建 GPT-2 的設定
+        # 1. 创建 GPT-2 的设定
         gpt2config = GPT2Config(
             vocab_size=token_params['vocab_size'],
-            # 總長度 = 歷史最大長度 + 目標 code 長度
+            # 总长度 = 历史最大长度 + 目标 code 长度
             n_positions=model_params['max_len'] * config['code_len'] + config['code_len'],
             n_embd=model_params['n_embd'],
             n_layer=model_params['n_layer'],
@@ -40,12 +40,12 @@ class GPT2(AbstractModel):
             attn_pdrop=model_params.get('attn_pdrop', 0.1),
             layer_norm_epsilon=float(model_params.get('layer_norm_epsilon', 1e-5)),
             initializer_range=model_params.get('initializer_range', 0.02),
-            # 指定特殊 token，生成時會用到
+            # 指定特殊 token，生成时会用到
             eos_token_id=token_params['eos_token_id'],
             pad_token_id=token_params['pad_token_id'],
         )
 
-        # 2. 實例化 GPT2LMHeadModel (for Language Modeling)
+        # 2. 实例化 GPT2LMHeadModel (for Language Modeling)
         self.gpt2 = GPT2LMHeadModel(config=gpt2config)
         self.n_params_str = self._calculate_n_parameters()
 
@@ -107,8 +107,8 @@ class GPT2(AbstractModel):
         return outputs
 
     def generate(self, **kwargs: Any) -> torch.Tensor:
-        """執行 GPT-2 的標準生成。"""
-        # generate 只需要 history (input_ids) 作為 prompt
+        """执行 GPT-2 的标準生成。"""
+        # generate 只需要 history (input_ids) 作为 prompt
         return self.gpt2.generate(**kwargs)
 
     def evaluate_step(self, batch: Dict[str, torch.Tensor], topk_list: List[int]) -> Dict[str, float]:
@@ -168,19 +168,19 @@ class GPT2(AbstractModel):
     @staticmethod
     def _calculate_pos_index(preds: torch.Tensor, labels: torch.Tensor, maxk: int) -> torch.Tensor:
         """
-        【與 TIGER 共享的評估邏輯】
-        假設 code 總是包含 L-1 個語義層和最後 1 個重複層。
+        【与 TIGER 共享的评估逻辑】
+        假设 code 总是包含 L-1 个语义层和最后 1 个重复层。
         """
         preds = preds.detach().cpu()
         labels = labels.detach().cpu()
         B, _, L_pred = preds.shape
         L_label = labels.shape[1]
 
-        # 如果生成長度不足（例如提前遇到 EOS），用 padding 補齊
+        # 如果生成长度不足（例如提前遇到 EOS），用 padding 补齐
         if L_pred < L_label:
             padding = torch.zeros((B, maxk, L_label - L_pred), dtype=preds.dtype)
             preds = torch.cat([preds, padding], dim=2)
-        # 如果生成長度過長，截斷
+        # 如果生成长度过长，截断
         elif L_pred > L_label:
             preds = preds[:, :, :L_label]
         
@@ -199,4 +199,3 @@ class GPT2(AbstractModel):
                     pos_index[i, j] = True
                     break
         return pos_index
-

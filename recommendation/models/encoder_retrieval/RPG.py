@@ -1,4 +1,4 @@
-# 檔案路徑: recommendation/models/retrieval/RPG.py (最終還原版 v4)
+# 文件路径: recommendation/models/retrieval/RPG.py (最终還原版 v4)
 
 import torch
 import torch.nn as nn
@@ -11,7 +11,7 @@ import logging
 from ..abstract_model import AbstractModel 
 import sys
 from pathlib import Path
-# 確保 metrics 和 utils/dataset (如果 item2code 在那裡) 可導入
+# 确保 metrics 和 utils/dataset (如果 item2code 在那里) 可导入
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from metrics import recall_at_k, ndcg_at_k
 try:
@@ -37,7 +37,7 @@ class RPG(AbstractModel):
         self.logger = logging.getLogger(self.__class__.__name__)
         model_params = self.config['model_params']; token_params = self.config['token_params']
         
-        # 1. 使用 item2code 構建 item_id -> offset_token_ids 映射
+        # 1. 使用 item2code 构建 item_id -> offset_token_ids 映射
         self.logger.info("Building item_id -> offset_token_ids map...")
         try:
             item_to_code_map, _ = item2code(
@@ -45,20 +45,20 @@ class RPG(AbstractModel):
             )
         except Exception as e: self.logger.error(f"Failed to build item_to_code map: {e}"); raise
         
-        # 將 map 轉為 Tensor (N+1, L_code)，放 CPU
+        # 将 map 转为 Tensor (N+1, L_code)，放 CPU
         max_item_id = max(item_to_code_map.keys()) if item_to_code_map else 0
         self.n_items = max_item_id + 1 
         self.code_len = config['code_len']
         pad_token_id = config['token_params']['pad_token_id']
         self.item_id2tokens_cpu = torch.full((self.n_items, self.code_len), pad_token_id, dtype=torch.long)
         for item_id, tokens in item_to_code_map.items():
-            if 0 < item_id < self.n_items: # 確保 item_id 在範圍內且 > 0
+            if 0 < item_id < self.n_items: # 确保 item_id 在范圍内且 > 0
                  if len(tokens) == self.code_len: self.item_id2tokens_cpu[item_id] = torch.LongTensor(tokens)
                  else: self.logger.warning(f"Item {item_id} code length mismatch. Skipping.")
             # else: self.logger.warning(f"Item ID {item_id} out of range. Skipping.")
         self.item_id2tokens = None # Lazy move to device
         self.logger.info(f"Built item_id2tokens tensor, shape: {self.item_id2tokens_cpu.shape}")
-        # (驗證 codebook 值的程式碼可以保留或移除)
+        # (验證 codebook 值的程式码可以保留或移除)
 
         # 2. 初始化 GPT-2 Config & Model
         gpt2config = GPT2Config(
@@ -76,7 +76,7 @@ class RPG(AbstractModel):
 
         # 3. 初始化 Prediction Heads
         self.n_pred_head = self.config['code_len']
-        # ✅ 使用 ModuleList, 但 forward 中應用方式改變
+        # ✅ 使用 ModuleList, 但 forward 中应用方式改變
         self.pred_heads = nn.ModuleList([ResBlock(model_params['n_embd']) for _ in range(self.n_pred_head)]) 
 
         # 4. 初始化其他
@@ -106,8 +106,8 @@ class RPG(AbstractModel):
     # ==================== FORWARD (核心修正) ====================
     def forward(self, batch: Dict) -> Dict:
         """
-        【最終還原版 v4 - 嚴格對齊原始訓練目標】
-        在 *整個序列* 上應用 Head 並使用 label_mask 選擇狀態和目標進行 Loss 計算。
+        【最终還原版 v4 - 严格对齐原始训练目标】
+        在 *整个序列* 上应用 Head 并使用 label_mask 选择状态和目标進行 Loss 计算。
         """
         input_item_ids = batch['input_ids']     # (B, L_item) 1-based IDs + padding 0
         attention_mask = batch['attention_mask'] # (B, L_item) Item-level Mask
@@ -127,44 +127,44 @@ class RPG(AbstractModel):
         outputs = self.gpt2(inputs_embeds=input_embs, attention_mask=attention_mask)
         gpt2_output_states = outputs.last_hidden_state # (B, L_item, D)
 
-        # --- 3. ✅ 應用 Prediction Heads 到整個序列 ---
-        # 這裡我們需要模仿原始碼的結果形狀 (B, L_item, L_code, D)
-        # 原始碼: final_states = [self.pred_heads[i](outputs.last_hidden_state)... torch.cat(..., dim=-2)]
-        # 這表示每個 head 獨立作用在 gpt2_output_states 上
+        # --- 3. ✅ 应用 Prediction Heads 到整个序列 ---
+        # 这里我们需要模仿原始码的结果形状 (B, L_item, L_code, D)
+        # 原始码: final_states = [self.pred_heads[i](outputs.last_hidden_state)... torch.cat(..., dim=-2)]
+        # 這表示每个 head 独立作用在 gpt2_output_states 上
         head_outputs = [head(gpt2_output_states) for head in self.pred_heads] # List of (B, L_item, D)
         final_states = torch.stack(head_outputs, dim=2) # Shape: (B, L_item, L_code, D)
 
-        # --- 4. ✅ 計算 Loss (嚴格模仿原始 RPG) ---
-        # 創建 mask，標記哪些位置需要計算 Loss (label 不是 -100)
+        # --- 4. ✅ 计算 Loss (严格模仿原始 RPG) ---
+        # 创建 mask，标記哪些位置需要计算 Loss (label 不是 -100)
         label_mask = labels_seq.view(-1) != -100 # Shape: (B * L_item,)
         valid_indices_flat = label_mask.nonzero(as_tuple=True)[0]
         
-        # 如果沒有有效標籤
+        # 如果没有有效标籤
         if valid_indices_flat.numel() == 0: 
             return {'loss': torch.tensor(0.0, device=current_device, requires_grad=True)}
             
-        # 獲取 *對應時間步* 的模型輸出表示
-        # .view(-1,...) 將 (B, L_item, L_code, D) -> (B*L_item, L_code, D)
-        # 然後用 label_mask 篩選
+        # 获取 *对应时间步* 的模型输出表示
+        # .view(-1,...) 将 (B, L_item, L_code, D) -> (B*L_item, L_code, D)
+        # 然后用 label_mask 筛选
         selected_states = final_states.view(-1, self.n_pred_head, self.config['model_params']['n_embd'])[label_mask]
         selected_states = F.normalize(selected_states, dim=-1) # (Num_Valid, L_code, D)
 
-        # 獲取目標 Item IDs (0-based)
+        # 获取目标 Item IDs (0-based)
         valid_target_item_ids_0based = labels_seq.view(-1)[label_mask] # (Num_Valid,)
         
-        # 查找目標 Item 的 Code Tokens (Global Offset)
-        # 增加邊界檢查
+        # 查找目标 Item 的 Code Tokens (Global Offset)
+        # 增加边界檢查
         max_target_id = valid_target_item_ids_0based.max().item(); min_target_id = valid_target_item_ids_0based.min().item()
         if max_target_id + 1 >= self.item_id2tokens.shape[0] or min_target_id < 0:
              self.logger.error(f"FATAL: Target Item ID out of bounds! Range: [{min_target_id}, {max_target_id}], Codebook items: {self.item_id2tokens.shape[0]-1}. Check DataLoader."); return {'loss': torch.tensor(1000.0, device=current_device, requires_grad=True)}
-        # 使用 0-based ID + 1 作為 1-based index 查找
+        # 使用 0-based ID + 1 作为 1-based index 查找
         token_labels = self.item_id2tokens[valid_target_item_ids_0based + 1] # (Num_Valid, L_code)
 
-        # 準備 global token embeddings (用於計算相似度)
+        # 準备 global token embeddings (用於计算相似度)
         token_emb = self.gpt2.wte.weight; token_emb_norm = F.normalize(token_emb, dim=-1)
         bases = torch.tensor(self.config['bases'], device=current_device); vocab_sizes = torch.tensor(self.config['vocab_sizes'], device=current_device)
         
-        # 判斷是否可以使用 chunk (保持不變)
+        # 判断是否可以使用 chunk (保持不變)
         all_same_size = all(vs == vocab_sizes[0] for vs in vocab_sizes); use_chunk = False
         if all_same_size and len(vocab_sizes) == self.n_pred_head:
             codebook_size_k = vocab_sizes[0].item(); start_idx = 1
@@ -178,28 +178,28 @@ class RPG(AbstractModel):
         # --- (移除 Debug 打印) ---
 
         for i in range(self.n_pred_head):
-            # 獲取第 i 層的 Codebook Embeddings
+            # 获取第 i 层的 Codebook Embeddings
             if use_chunk: token_embs_i = token_embs_chunks[i] # (K, D)
             else: start_idx = bases[i] + 1; end_idx = min(start_idx + vocab_sizes[i], token_emb.shape[0]); token_embs_i = token_emb_norm[start_idx:end_idx] # (K, D)
             
-            # 獲取第 i 層的 User Representation (來自對應時間步)
+            # 获取第 i 层的 User Representation (来自对应时间步)
             user_repr_i = selected_states[:, i, :] # (Num_Valid, D)
             
-            # 計算 Logits
+            # 计算 Logits
             logits_i = torch.matmul(user_repr_i, token_embs_i.T) / self.temperature # (Num_Valid, K)
             
-            # 獲取第 i 層的 Target Labels (0-based)
+            # 获取第 i 层的 Target Labels (0-based)
             labels_i = token_labels[:, i] - bases[i] - 1 # (Num_Valid,)
 
-            # 最終邊界檢查 (保持)
+            # 最终边界檢查 (保持)
             if not (torch.all(labels_i >= 0) and torch.all(labels_i < logits_i.shape[1])):
                  invalid_mask = (labels_i < 0) | (labels_i >= logits_i.shape[1]); invalid_labels = labels_i[invalid_mask]; corresponding_global_tokens = token_labels[:, i][invalid_mask]
                  self.logger.error(f"FATAL: Head {i} labels out of bounds! Logits Dim 1: {logits_i.shape[1]}. Invalid labels: {invalid_labels.cpu().numpy()}. Global tokens: {corresponding_global_tokens.cpu().numpy()}. Skipping loss.")
                  losses.append(torch.tensor(100.0, device=current_device, requires_grad=True)); continue
             
             # ✅ 使用原始的 self.loss_fct (帶 ignore_index)
-            # 雖然 label_mask 已經過濾了 -100，但 CrossEntropyLoss 本身處理 0-based 索引
-            # 這裡 logits_i 是 (Num_Valid, K)，labels_i 是 (Num_Valid,)，符合要求
+            # 虽然 label_mask 已经过滤了 -100，但 CrossEntropyLoss 本身处理 0-based 索引
+            # 這里 logits_i 是 (Num_Valid, K)，labels_i 是 (Num_Valid,)，符合要求
             losses.append(self.loss_fct(logits_i, labels_i))
 
         if losses: 
@@ -215,12 +215,12 @@ class RPG(AbstractModel):
 
         return {'loss': loss}
 
-    # --- _generate_ranklist 和 evaluate_step 保持不變 (它們只用最後狀態) ---
+    # --- _generate_ranklist 和 evaluate_step 保持不變 (它们只用最后状态) ---
     def _generate_ranklist(self, batch: Dict, topk: int) -> torch.Tensor:
         """
-        (v4 - 保持不變) 
-        為評估生成 topk 排序列表。
-        只使用 *最後* 的隱藏狀態來表示用戶。
+        (v4 - 保持不变)
+        为评估生成 topk 排序列表。
+        只使用 *最后* 的隐藏状态来表示用户。
         """
         input_item_ids = batch['input_ids']; attention_mask = batch['attention_mask']; batch_size = input_item_ids.shape[0]
         current_device = input_item_ids.device
@@ -303,45 +303,45 @@ class RPG(AbstractModel):
     # ==================== EVALUATE (核心修正) ====================
     def evaluate_step(self, batch: Dict, topk_list: List[int]) -> Dict[str, float]:
         """
-        【最終還原版 v4 - 已修正】
-        此版本返回指標的 *总和 (sum)* 和批次大小 ('count')，
+        【最终還原版 v4 - 已修正】
+        此版本返回指标的 *总和 (sum)* 和批次大小 ('count')，
         以配合 trainer.py 中的正确平均值计算。
         """
         max_k = max(topk_list)
         
-        # 1. 獲取 Ranklist (1-based IDs) 和 Targets (0-based IDs)
+        # 1. 获取 Ranklist (1-based IDs) 和 Targets (0-based IDs)
         # _generate_ranklist 返回 1-based item IDs
         ranked_item_indices = self._generate_ranklist(batch, topk=max_k) # (B, max_k)
         
-        # 從 dataloader 獲取 0-based target IDs
+        # 从 dataloader 获取 0-based target IDs
         target_ids = batch['target_ids'].unsqueeze(1) # (B, 1), 0-based IDs
         
-        # ✅ 獲取真實的批次大小
+        # ✅ 获取真实的批次大小
         batch_size = target_ids.shape[0]
 
-        # 2. 計算命中 (boolean tensor)
-        # 將 1-based ranked list 轉換為 0-based, 然後與 0-based target 比較
+        # 2. 计算命中 (boolean tensor)
+        # 将 1-based ranked list 转换为 0-based, 然后与 0-based target 比较
         hits = ((ranked_item_indices - 1) == target_ids).cpu() # (B, max_k)
 
-        # 3. 計算指標總和
+        # 3. 计算指标总和
         batch_metrics = {}
         for k in topk_list:
             pos_index_k = hits[:, :k] # (B, k)
             
             if pos_index_k.numel() > 0:
-                # ✅ 計算批次內的總和 (sum)，而不是平均值 (mean)
+                # ✅ 计算批次内的总和 (sum)，而不是平均值 (mean)
                 recall_sum = recall_at_k(pos_index_k, k).sum().item() 
                 ndcg_sum = ndcg_at_k(pos_index_k, k).sum().item()
             else:
                 recall_sum = 0.0
                 ndcg_sum = 0.0
                 
-            # 存儲總和
+            # 存储总和
             batch_metrics[f'Recall@{k}'] = recall_sum 
             batch_metrics[f'NDCG@{k}'] = ndcg_sum
             
         # ✅ 4. 添加批次大小 'count'
         batch_metrics['count'] = float(batch_size) 
           
-        # 返回包含 count 和 指標總和 的字典
+        # 返回包含 count 和 指标总和 的字典
         return batch_metrics

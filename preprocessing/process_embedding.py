@@ -5,7 +5,11 @@ import os
 import sys
 import numpy as np
 import torch 
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_LOCAL_TEXT_MODEL = os.path.join(SCRIPT_DIR, 'emb_llm', 'Qwen3-Embedding-8B')
+DEFAULT_OPENAI_BASE_URL = 'https://yunwu.ai/v1'
 
 # ✅ (核心修改) 导入增强后的 utils.py 中的函数
 try:
@@ -96,17 +100,18 @@ def main():
     parser.add_argument('--dataset_type', type=str, default='amazon', choices=['amazon', 'movielens'], help='数据集类型')
     parser.add_argument('--data_version', type=str, default='14', choices=['14','18'], help='Amazon 版本')
     parser.add_argument('--save_root', type=str, default='../datasets', help='保存预处理数据的根目录')
+    parser.add_argument('--text_format', type=str, default='rpg_sentence', choices=['rpg_sentence', 'unigenrec'], help='[text/vlm] item 文本构造格式')
     # ✅ (修改) image_root 指向 amazonXX/Images/ 或类似目录
     parser.add_argument('--image_root', type=str, default='../datasets', help='包含图像信息文件和图像文件夹的根目录 (e.g., ../datasets)') 
 
     # --- 模型参数 ---
     # (保持不变)
-    parser.add_argument('--model_name_or_path', type=str, default='sentence-transformers/sentence-t5-base', help='[text_local] 本地 Transformer 模型')
+    parser.add_argument('--model_name_or_path', type=str, default=DEFAULT_LOCAL_TEXT_MODEL, help='[text_local] 本地 Transformer 模型')
     parser.add_argument('--max_sent_len', type=int, default=1024, help='[text_local] 文本最大长度')
     parser.add_argument('--sent_emb_model', type=str, default='text-embedding-3-large', help='[text_api] OpenAI 模型 ID')
     parser.add_argument('--api_emb_dim', type=int, default=0, help='[text_api] API 输出维度 (0 为自动)')
-    parser.add_argument('--openai_api_key', type=str, default='sk-492a02uVsAauNrYsP4YRW2pvAsELc20hoHJeUh2Sop3GiL3C', help='OpenAI Key')
-    parser.add_argument('--openai_base_url', type=str, default='https://yunwu.ai/v1', help='OpenAI Base URL')
+    parser.add_argument('--openai_api_key', type=str, default=os.environ.get('OPENAI_API_KEY'), help='OpenAI Key')
+    parser.add_argument('--openai_base_url', type=str, default=os.environ.get('OPENAI_BASE_URL', DEFAULT_OPENAI_BASE_URL), help='OpenAI Base URL')
     parser.add_argument('--clip_model_name', type=str, default='openai/clip-vit-base-patch32', help='[image_clip] CLIP 模型 ID')
     parser.add_argument('--sasrec_hidden_dim', type=int, default=64, help='[cf_sasrec] 隐藏维度')
     parser.add_argument('--sasrec_max_seq_len', type=int, default=50, help='[cf_sasrec] 序列长度')
@@ -121,7 +126,7 @@ def main():
 
     # --- 通用 ---
     parser.add_argument('--model_cache_dir', type=str, default=None, help='Hugging Face 缓存目录')
-    parser.add_argument('--batch_size', type=int, default=512, help='批处理大小')
+    parser.add_argument('--batch_size', type=int, default=32, help='批处理大小')
     parser.add_argument('--pca_dim', type=int, default=512, help='PCA 目标维度 (<=0 不降维)')
     parser.add_argument('--gpu_id', type=int, default=0, help='GPU ID (<0 使用 CPU)')
     
@@ -130,7 +135,6 @@ def main():
 
     # --- 1. 加载通用数据 ---
     try:
-        # ✅ (修改) 接收 image_dir
         id2item, item_meta, images_info, image_dir = load_common_data(args) 
         text_map = {}
         if args.embedding_type in ['text_local', 'text_api', 'vlm_fused']:
@@ -156,7 +160,7 @@ def main():
             for new_id_str in sorted_new_ids:
                  orig_id = id2item[new_id_str]
                  # encoder 需要 int 类型的 ID
-                 item_text_list.append([int(new_id_str), text_map.get(orig_id, "N/A").split()]) 
+                 item_text_list.append([int(new_id_str), text_map.get(orig_id, "N/A")])
                  
             embeddings = text_encoder.generate_local_text(args, item_text_list)
             modality_tag = "text"
@@ -167,7 +171,7 @@ def main():
             sorted_new_ids = sorted(id2item.keys(), key=int)
             for new_id_str in sorted_new_ids:
                  orig_id = id2item[new_id_str]
-                 item_text_list.append([int(new_id_str), text_map.get(orig_id, "N/A").split()])
+                 item_text_list.append([int(new_id_str), text_map.get(orig_id, "N/A")])
                  
             embeddings = text_encoder.generate_api_text(args, item_text_list)
             modality_tag = "text"

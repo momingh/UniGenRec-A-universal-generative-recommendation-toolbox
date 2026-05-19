@@ -22,7 +22,25 @@ except ImportError as e:
 
 # 🚨 (移除) 不再需要在这里定义 load_json, clean_text, set_device 等
 
-# 🚨 (移除) 不再需要在这里定义 load_json, clean_text, set_device 等
+def _to_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(token) for token in value)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _order_texts(item_text_list):
+    items, texts = zip(*item_text_list)
+    max_item_id = max(items) if items else -1
+    order_texts = [""] * (max_item_id + 1)
+    for item, text in zip(items, texts):
+        order_texts[item] = _to_text(text)
+    return items, order_texts
+
+
 def generate_local_text(args, item_text_list) -> np.ndarray:
     """使用本地 Transformer 模型生成文本嵌入"""
     print(f"🔹 使用本地模型生成文本嵌入: {args.model_name_or_path}")
@@ -37,16 +55,7 @@ def generate_local_text(args, item_text_list) -> np.ndarray:
     model = SentenceTransformer(args.model_name_or_path, device=str(device))
     model.eval()
     
-    # (数据准备逻辑 —— 完全保持不变)
-    items, texts = zip(*item_text_list)
-    max_item_id = max(items) if items else -1
-    order_texts = [[""]] * (max_item_id + 1)
-    for item, text in zip(items, texts):
-        order_texts[item] = text if text else [""]
-    for i in range(len(order_texts)):
-        if not order_texts[i]:
-            order_texts[i] = [""]
-    final_texts = [" ".join(t) for t in order_texts]
+    items, final_texts = _order_texts(item_text_list)
 
     embeddings = []
 
@@ -55,7 +64,6 @@ def generate_local_text(args, item_text_list) -> np.ndarray:
         for i in tqdm(range(0, len(final_texts), args.batch_size), desc="Local Text Encoding"):
             batch_texts = final_texts[i : i + args.batch_size]
             batch_texts = [t if t.strip() else "N/A" for t in batch_texts]
-
             try:
                 # 👉 使用 SentenceTransformer 的 encode（自动 tokenizer + pooling）
                 batch_emb = model.encode(
@@ -107,15 +115,7 @@ def generate_api_text(args, item_text_list) -> np.ndarray:
 
     client = OpenAI(api_key=args.openai_api_key, base_url=args.openai_base_url)
 
-    # (数据准备逻辑 - 保持不变)
-    items, texts = zip(*item_text_list)
-    max_item_id = max(items) if items else -1
-    order_texts = [[""]] * (max_item_id + 1)
-    for item, text in zip(items, texts):
-        order_texts[item] = text if text else [""]
-    for i in range(len(order_texts)):
-        if not order_texts[i]: order_texts[i] = [""] 
-    final_texts = [" ".join(t) for t in order_texts]
+    items, final_texts = _order_texts(item_text_list)
 
     sent_embs = []
     api_emb_dim = args.api_emb_dim 
@@ -140,14 +140,12 @@ def generate_api_text(args, item_text_list) -> np.ndarray:
                 print(f"\n[INFO] 实际检测到 API 嵌入维度为: {api_emb_dim}")
                 
         except Exception as e:
-            print(f"\n[警告] API 请求批次 {i//args.batch_size} 失败: {e}")
-            if api_emb_dim <= 0:
-                 print("错误：API 维度未知且未在 --api_emb_dim 中指定，无法创建零向量。")
-                 api_emb_dim = 1024 # 最后的默认回退
-                 print(f"警告：将假设维度为 {api_emb_dim}。")
-                 
-            sent_embs.extend([np.zeros(api_emb_dim, dtype=np.float32) for _ in batch])
-            time.sleep(1)
+            batch_id = i // args.batch_size
+            message = str(e)
+            raise RuntimeError(
+                f"API 请求批次 {batch_id} 失败，已停止生成 embedding，避免用零向量污染结果。"
+                f"原始错误: {message}"
+            ) from e
 
     if not sent_embs: # 处理完全失败
          raise RuntimeError("未能生成任何 API 文本嵌入。")

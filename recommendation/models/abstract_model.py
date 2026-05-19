@@ -21,7 +21,7 @@ class AbstractModel(nn.Module, ABC):
     @property
     @abstractmethod
     def task_type(self) -> str:
-        """返回模型的任務類型，例如 'generative' 或 'retrieval'。"""
+        """返回模型的任务类型，例如 'generative' 或 'retrieval'。"""
         raise NotImplementedError
 
     @property

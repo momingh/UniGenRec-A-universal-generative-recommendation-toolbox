@@ -123,7 +123,14 @@ Train a generative recommender using the generated SIDs.
 cd recommendation
 
 python main.py \
-  --model TIGER \
-  --dataset Baby \
-  --quant_method rqvae
+  --model RPG \
+  --dataset Beauty \
+  --quant_method opq
 ```
+
+"""
+python main.py \
+  --model TIGER \
+  --dataset Beauty \
+  --quant_method rqvae
+"""

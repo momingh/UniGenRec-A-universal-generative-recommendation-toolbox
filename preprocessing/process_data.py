@@ -13,192 +13,164 @@ import ast  # 用于 Amazon 2014
 # 假设 utils.py 在同一目录或 Python 路径中
 from utils import check_path, clean_text, write_json_file, write_remap_index, load_json
 
-# --- Amazon 2018/2014 特定的元数据加载逻辑 ---
-def load_meta_items_amazon(file_path, data_version):
+# --- Amazon 2014 特定的元数据加载逻辑 ---
+def _flatten_amazon_categories(raw_categories):
+    values = []
+
+    def collect(node):
+        if isinstance(node, list):
+            for item in node:
+                collect(item)
+            return
+        if node is None:
+            return
+
+        text = clean_text(str(node))
+        if text:
+            values.append(text)
+
+    collect(raw_categories)
+    return ",".join(values)
+
+
+def _normalize_amazon_brand(raw_brand):
+    if not isinstance(raw_brand, str):
+        return clean_text(raw_brand)
+    return clean_text(raw_brand.replace("by\n", " ").strip())
+
+
+def _build_review_match_key(user_id, item_id, rating, timestamp):
+    return (str(user_id), str(item_id), float(rating), int(timestamp))
+
+
+def load_k_core_review_details(rating_inters, review_file_path):
     """
-    加载亚马逊元数据文件，智能兼容 2014 和 2018 年的数据集格式。
-    无论输入是哪个版本，都输出统一格式的字典。
+    为 K-core 过滤后保留的交互加载 review 明细。
+    匹配键: reviewerID, asin, overall, unixReviewTime
     """
+    if not review_file_path or not os.path.exists(review_file_path):
+        print(f"[WARN] Review file not found: {review_file_path}")
+        return {}
+
+    retained_keys = {
+        _build_review_match_key(user, item, rating, timestamp)
+        for user, item, rating, timestamp in rating_inters
+    }
+    retained_items = {item for _, item, _, _ in rating_inters}
+    review_details = {}
+
+    matched_keys = set()
+    matched_reviews = 0
+
+    with gzip.open(review_file_path, "rt", encoding="utf-8") as fp:
+        for line in tqdm(fp, desc="Attach K-core review details"):
+            try:
+                data = json.loads(line)
+                item_id = data.get("asin")
+                if item_id not in retained_items:
+                    continue
+
+                review_key = _build_review_match_key(
+                    data.get("reviewerID"),
+                    item_id,
+                    data.get("overall"),
+                    data.get("unixReviewTime"),
+                )
+                if review_key not in retained_keys or review_key in matched_keys:
+                    continue
+
+                review_record = {
+                    "asin": item_id,
+                    "reviewerID": data.get("reviewerID"),
+                    "helpful": data.get("helpful"),
+                    "overall": data.get("overall"),
+                    "reviewText": data.get("reviewText"),
+                    "reviewTime": data.get("reviewTime"),
+                    "reviewerName": data.get("reviewerName"),
+                    "summary": data.get("summary"),
+                    "unixReviewTime": data.get("unixReviewTime"),
+                }
+
+                review_details[review_key] = review_record
+                matched_keys.add(review_key)
+                matched_reviews += 1
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                continue
+
+    missing_reviews = len(retained_keys - matched_keys)
+    print(f"K-core review details matched: {matched_reviews}/{len(retained_keys)}")
+    if missing_reviews:
+        print(f"[WARN] Missing review details for {missing_reviews} retained interactions.")
+
+    return review_details
+
+
+def load_meta_items_amazon(file_path):
+    """加载 Amazon 2014 元数据文件。"""
     items = {}
-    parser = ast.literal_eval if data_version == '14' else json.loads
 
     with gzip.open(file_path, "rt", encoding='utf-8') as fp:
         for line in tqdm(fp, desc="Load Amazon metas"):
             try:
-                data = parser(line)
+                data = ast.literal_eval(line)
                 item_id = data.get("asin")
                 if not item_id:
                     continue
 
-                # 定义统一的数据结构
-                unified_info = {
-                    "title": "", 
-                    "description": "", 
-                    "brand": "", 
-                    "categories": ""
-                }
+                item_meta = dict(data)
 
-                # --- 兼容性逻辑 ---
-                if data_version == '18':
-                    unified_info['title'] = clean_text(data.get('title', ''))
-                    unified_info['description'] = clean_text(' '.join(data.get('description', [])))
-                    unified_info['brand'] = data.get('brand', '').replace("by\n", "").strip()
-                    # 2018版的'category'是列表
-                    cats = [cat.strip() for cat in data.get('category', []) if "</span>" not in cat]
-                    unified_info['categories'] = ",".join(cats).strip()
-                
-                elif data_version == '14':
-                    unified_info['title'] = clean_text(data.get('title', ''))
-                    unified_info['description'] = clean_text(data.get('description', ''))
-                    unified_info['brand'] = data.get('brand', '').replace("by\n", "").strip()
-                    # 2014版的'categories'是列表的列表
-                    cats_list = data.get('categories', [[]])
-                    if cats_list and isinstance(cats_list, list) and len(cats_list) > 0:
-                        cats = [cat.strip() for cat in cats_list[0] if "</span>" not in cat]
-                        unified_info['categories'] = ",".join(cats).strip()
-                
-                items[item_id] = unified_info
-            
+                item_meta['title_text'] = clean_text(data.get('title', ''))
+                item_meta['price_text'] = clean_text(data.get('price', ''))
+                item_meta['brand_text'] = _normalize_amazon_brand(data.get('brand', ''))
+                item_meta['feature_text'] = clean_text(data.get('feature', ''))
+                item_meta['categories_text'] = _flatten_amazon_categories(data.get('categories', []))
+                item_meta['description_text'] = clean_text(data.get('description', ''))
+
+                items[item_id] = item_meta
+
             except (ValueError, SyntaxError, TypeError, KeyError):
                 continue
+
     return items
 
-import csv
-from tqdm import tqdm
 
-def load_item_meta_recbole(file_path, sep='\t'):
+def write_review_file(args, rating_inters, review_details, user2index, item2index):
     """
-    加载 RecBole 风格的 item 元数据文件，动态解析列名，
-    并将列名中 ':' 之后的类型信息去除。
+    将 reviewText 及相关 review 字段单独保存，并与 user/item 交互对齐。
+    """
+    output_dir = os.path.join(args.output_path, args.dataset)
+    review_path = os.path.join(output_dir, f'{args.dataset}.review.jsonl')
 
-    返回:
-        items: dict
-            {
-              item_id: {
-                  field_name: value,
-                  ...
-              }
+    print(f'Writing review file: {review_path}')
+    with open(review_path, 'w', encoding='utf-8') as fp:
+        for user, item, rating, timestamp in rating_inters:
+            review_key = _build_review_match_key(user, item, rating, timestamp)
+            review_info = review_details.get(review_key, {})
+
+            record = {
+                "user": str(user2index[user]),
+                "item": str(item2index[item]),
+                "user_raw": user,
+                "item_raw": item,
+                "rating": float(rating),
+                "timestamp": int(timestamp),
+                "reviewText": review_info.get("reviewText", ""),
+                "summary": review_info.get("summary", ""),
+                "helpful": review_info.get("helpful"),
+                "reviewTime": review_info.get("reviewTime"),
+                "reviewerName": review_info.get("reviewerName"),
             }
-    """
-    items = {}
-
-    with open(file_path, 'r', encoding='utf-8') as fp:
-        reader = csv.reader(fp, delimiter=sep)
-
-        # 读取表头
-        raw_header = next(reader)
-        header = [h.split(':')[0] for h in raw_header]
-
-        # 找到 item_id 列索引
-        if 'item_id' not in header:
-            raise ValueError("item metadata must contain 'item_id' column")
-
-        item_id_idx = header.index('item_id')
-
-        for row in tqdm(reader, desc="Load RecBole item meta"):
-            if not row or len(row) != len(header):
-                continue
-
-            item_id = row[item_id_idx]
-            if not item_id:
-                continue
-
-            meta = {}
-            for i, field in enumerate(header):
-                if i == item_id_idx:
-                    continue
-
-                value = row[i]
-                if value == '' or value == 'None':
-                    continue
-
-                meta[field] = value
-
-            items[item_id] = meta
-
-    return items
-
-
-def resolve_recbole_input_root(input_path, dataset_name):
-    prefixed_root = os.path.join(input_path, f"recbole_{dataset_name}")
-    legacy_root = os.path.join(input_path, dataset_name)
-
-    for candidate_root in [prefixed_root, legacy_root]:
-        rating_file_path = os.path.join(candidate_root, f'{dataset_name}.inter')
-        meta_file_path = os.path.join(candidate_root, f'{dataset_name}.item')
-        if os.path.exists(rating_file_path) and os.path.exists(meta_file_path):
-            return candidate_root
-
-    raise FileNotFoundError(
-        f"RecBole dataset files not found under '{prefixed_root}' or '{legacy_root}'"
-    )
-
-
-def preprocess_recbole(args):
-    """
-    处理 recbole 数据集。
-    """
-    print('Process rating data: ')
-    print(' Dataset: ', args.dataset)
-
-    # 动态构造输入文件根目录
-    input_root_path = resolve_recbole_input_root(args.input_path, args.dataset)
-    # 动态构造 ratings 文件路径
-    rating_file_path = os.path.join(input_root_path,f'{args.dataset}.inter')
-    if not os.path.exists(rating_file_path):
-        raise FileNotFoundError(f"Ratings file not found: {rating_file_path}")
-
-    users, items, rating_inters = set(), set(), set()
-
-    with open(rating_file_path, 'r', encoding='utf-8') as fp:
-        next(fp)  # 跳过第一行（表头）
-        for line in tqdm(fp, desc='Load ratings'):
-            try:
-                user, item, rating, time = line.strip().split('\t')
-                users.add(user)
-                items.add(item)
-                rating_inters.add((user, item, float(rating), int(float(time))))
-            except ValueError:
-                continue
-
-    # 动态构造 meta 文件路径
-    meta_file_path = os.path.join(input_root_path, f'{args.dataset}.item')
-    if not os.path.exists(meta_file_path):
-        raise FileNotFoundError(f"Metadata file not found: {meta_file_path}")
-
-    # 调用 RecBole 专属的 load_item_meta_recbole
-    meta_items = load_item_meta_recbole(meta_file_path)
-
-    print('The number of raw inters: ', len(rating_inters))
-    rating_inters = make_inters_in_order(rating_inters)
-    
-    # 过滤掉没有元数据的交互
-    filtered_inters = []
-    for inter in tqdm(rating_inters, desc="Filtering interactions by meta items"):
-        if inter[1] in meta_items:
-            filtered_inters.append(inter)
-    rating_inters = filtered_inters
-    print(f"Interactions after meta filtering: {len(rating_inters)}")
-
-    # K-core 过滤
-    rating_inters = filter_inters(rating_inters, can_items=None,
-                                  user_k_core_threshold=args.user_k,
-                                  item_k_core_threshold=args.item_k)
-    
-    rating_inters = make_inters_in_order(rating_inters)
-    print('\n')
-    return rating_inters, meta_items
+            json.dump(record, fp, ensure_ascii=False)
+            fp.write("\n")
 
 def preprocess_amazon(args):
     """
-    处理 Amazon '14 或 '18 数据集。
+    处理 Amazon 2014 数据集。
     """
     print('Process Amazon rating data: ')
     print(' Dataset: ', args.dataset)
-    print(' Data Version: ', args.data_version)
 
-    # 动态构造输入文件根目录
-    input_root_path = os.path.join(args.input_path, f'amazon{args.data_version}')
+    input_root_path = os.path.join(args.input_path, 'amazon14')
 
     # (已移除 Amazon 脚本中未使用的 images_info 加载)
 
@@ -206,7 +178,7 @@ def preprocess_amazon(args):
     rating_file_path = os.path.join(input_root_path, 'Ratings', f'{args.dataset}.csv')
     if not os.path.exists(rating_file_path):
         raise FileNotFoundError(f"Ratings file not found: {rating_file_path}")
-    
+
     # 调用通用的 load_ratings
     _, _, rating_inters = load_ratings(rating_file_path)
 
@@ -215,12 +187,14 @@ def preprocess_amazon(args):
     if not os.path.exists(meta_file_path):
         raise FileNotFoundError(f"Metadata file not found: {meta_file_path}")
 
+    review_file_path = os.path.join(input_root_path, 'Review', f'{args.dataset}_5.json.gz')
+
     # 调用 Amazon 专属的 load_meta_items_amazon
-    meta_items = load_meta_items_amazon(meta_file_path, args.data_version)
+    meta_items = load_meta_items_amazon(meta_file_path)
 
     print('The number of raw inters: ', len(rating_inters))
     rating_inters = make_inters_in_order(rating_inters)
-    
+
     # 过滤掉没有元数据的交互
     filtered_inters = []
     for inter in tqdm(rating_inters, desc="Filtering interactions by meta items"):
@@ -233,70 +207,11 @@ def preprocess_amazon(args):
     rating_inters = filter_inters(rating_inters, can_items=None,
                                   user_k_core_threshold=args.user_k,
                                   item_k_core_threshold=args.item_k)
-    
+
     rating_inters = make_inters_in_order(rating_inters)
+    review_details = load_k_core_review_details(rating_inters, review_file_path)
     print('\n')
-    return rating_inters, meta_items
-
-# --- MovieLens 特定的元数据加载逻辑 ---
-def load_meta_items_movielens(file_path):
-    """加载电影元数据"""
-    movies = {}
-    with open(file_path, 'r', encoding='utf-8') as fp:
-        movies_data = json.load(fp)
-        
-    for movie_id, data in movies_data.items():
-        movies[movie_id] = {
-            'title': clean_text(data.get('title', '')),
-            'description': clean_text(data.get('description', '')),
-            'genres': data.get('genres', []),
-            'year': data.get('year', None)
-        }
-    return movies
-
-def preprocess_movielens(args):
-    """处理 MovieLens 数据集"""
-    print('Process MovieLens rating data: ')
-    print(' Dataset: ', args.dataset)
-
-    # 构建输入文件路径
-    input_root_path = os.path.join(args.input_path, args.dataset, 'processed')
-    
-    # 加载评分数据
-    rating_file_path = os.path.join(input_root_path, f'{args.dataset}.csv')
-    if not os.path.exists(rating_file_path):
-        raise FileNotFoundError(f"Ratings file not found: {rating_file_path}")
-    
-    # 调用通用的 load_ratings
-    _, _, rating_inters = load_ratings(rating_file_path)
-
-    # 加载电影元数据
-    movies_file_path = os.path.join(input_root_path, f'{args.dataset}.item.json')
-    if not os.path.exists(movies_file_path):
-        raise FileNotFoundError(f"Movies file not found: {movies_file_path}")
-    
-    # 调用 MovieLens 专属的 load_meta_items_movielens
-    movie_items = load_meta_items_movielens(movies_file_path)
-
-    print('The number of raw inters: ', len(rating_inters))
-    rating_inters = make_inters_in_order(rating_inters)
-    
-    # 过滤掉没有元数据的交互
-    filtered_inters = []
-    for inter in tqdm(rating_inters, desc="Filtering interactions by movie metadata"):
-        if inter[1] in movie_items:
-            filtered_inters.append(inter)
-    rating_inters = filtered_inters
-    print(f"Interactions after metadata filtering: {len(rating_inters)}")
-
-    # K-core 过滤
-    rating_inters = filter_inters(rating_inters, can_items=None,
-                                  user_k_core_threshold=args.user_k,
-                                  item_k_core_threshold=args.item_k)
-    
-    rating_inters = make_inters_in_order(rating_inters)
-    print('\n')
-    return rating_inters, movie_items
+    return rating_inters, meta_items, review_details
 
 # =================================================================
 # ============ 以下是两个脚本完全共享的通用函数 ============
@@ -307,14 +222,18 @@ def load_ratings(file):
     (通用) 加载 .csv 格式的评分数据
     格式: item, user, rating, time
     """
-    users, items, inters = set(), set(), set()
+    users, items, seen_inters, inters = set(), set(), set(), []
     with open(file, 'r') as fp:
         for line in tqdm(fp, desc='Load ratings'):
             try:
                 item, user, rating, time = line.strip().split(',')
+                inter = (user, item, float(rating), int(time))
+                if inter in seen_inters:
+                    continue
                 users.add(user)
                 items.add(item)
-                inters.add((user, item, float(rating), int(time)))
+                seen_inters.add(inter)
+                inters.append(inter)
             except ValueError:
                 continue
     return users, items, inters
@@ -350,7 +269,7 @@ def filter_inters(inters, can_items=None,
                 new_inters.append(unit)
         inters, new_inters = new_inters, []
         print('    The number of inters: ', len(inters))
-        
+
     if user_k_core_threshold or item_k_core_threshold:
         print('\nFiltering by k-core:')
         idx = 0
@@ -378,7 +297,11 @@ def filter_inters(inters, can_items=None,
     return inters
 
 def make_inters_in_order(inters):
-    """(通用) 按用户和时间戳排序交互"""
+    """(通用) 按用户和时间戳排序交互。
+
+    Python sort is stable, so equal-timestamp interactions keep the order from
+    load_ratings. This preserves the raw review file order as the tie-breaker.
+    """
     user2inters, new_inters = collections.defaultdict(list), list()
     for inter in tqdm(inters):
         user, item, rating, timestamp = inter
@@ -429,11 +352,11 @@ def generate_data(args, rating_inters):
         valid_inters[u_index] = [str(inters[-2])]
         test_inters[u_index] = [str(inters[-1])]
         assert len(user2items[u_index]) == len(train_inters[u_index]) + len(valid_inters[u_index]) + len(test_inters[u_index])
-    
+
     # 过滤掉那些在 K-core 之后但在划分时少于3个交互的用户
     valid_uids = set(train_inters.keys())
     user2items = {uid: items for uid, items in user2items.items() if uid in valid_uids}
-    
+
     print(f"Total users after split (>=3 items): {len(user2items)}")
     return user2items, train_inters, valid_inters, test_inters, user2index, item2index
 
@@ -497,25 +420,21 @@ def convert_to_atomic_files(args, train_data, valid_data, test_data, max_history
 def parse_args():
     """(通用) 统一的参数解析器"""
     parser = argparse.ArgumentParser()
-    
+
     # 新增：用于分发任务的参数
-    parser.add_argument('--dataset_type', type=str, required=True, choices=['amazon', 'movielens','recbole'],
-                        help='Type of the dataset to process (amazon or movielens)')
-    
+    parser.add_argument('--dataset_type', type=str, required=True, choices=['amazon'],
+                        help='Type of the dataset to process. Only amazon is supported.')
+
     # 通用参数
-    parser.add_argument('--dataset', type=str, required=True, 
-                        help='Dataset name (e.g., Home, Baby, ml-1m, ml-20m)')
+    parser.add_argument('--dataset', type=str, required=True,
+                        help='Dataset name (e.g., Home, Baby)')
     parser.add_argument('--user_k', type=int, default=5, help='user k-core filtering')
     parser.add_argument('--item_k', type=int, default=5, help='item k-core filtering')
-    parser.add_argument('--input_path', type=str, default='../datasets', 
-                        help='Root path containing dataset folders (e.g., amazon14/, amazon18/, ml-1m/)')
+    parser.add_argument('--input_path', type=str, default='../datasets',
+                        help='Root path containing dataset folders (e.g., amazon14/)')
     parser.add_argument('--output_path', type=str, default='../datasets',
                         help='Root path to save processed data')
-    
-    # Amazon 专用参数
-    parser.add_argument('--data_version', type=str, default='14', choices=['14', '18'],
-                        help='Amazon dataset version (14 or 18). Only used if dataset_type=amazon.')
-    
+
     return parser.parse_args()
 
 # =================================================================
@@ -524,32 +443,25 @@ def parse_args():
 
 if __name__ == '__main__':
     args = parse_args()
-    
+
     print('\n' + '=' * 20)
     print(f"Start processing dataset: {args.dataset} (Type: {args.dataset_type})")
     print('=' * 20 + '\n')
-        
-    # --- 1. 调度特定于数据集的预处理 ---
-    if args.dataset_type == 'amazon':
-        rating_inters, meta_items = preprocess_amazon(args)
-    elif args.dataset_type == 'movielens':
-        rating_inters, meta_items = preprocess_movielens(args)
-    elif args.dataset_type == 'recbole':
-        rating_inters, meta_items = preprocess_recbole(args)
-    else:
-        raise ValueError(f"Unknown dataset_type: {args.dataset_type}")
-    
+
+    # --- 1. Amazon 数据预处理 ---
+    rating_inters, meta_items, review_details = preprocess_amazon(args)
+
     # --- 2. 执行通用的数据划分 ---
     # 无论上面走了哪个分支，这里都拿到了 rating_inters 和 meta_items
     all_inters, train_inters, valid_inters, test_inters, user2index, item2index = generate_data(args, rating_inters)
-    
+
     # --- 3. 执行通用的文件保存 ---
     output_dataset_path = os.path.join(args.output_path, args.dataset)
     check_path(output_dataset_path)
 
     # 保存 .inter.json
     write_json_file(all_inters, os.path.join(output_dataset_path, f'{args.dataset}.inter.json'))
-    
+
     # 保存 .train.jsonl, .valid.jsonl, .test.jsonl
     # (注意：我修改了 convert_to_atomic_files 中的滑动窗口逻辑，使其更符合标准)
     convert_to_atomic_files(args, train_inters, valid_inters, test_inters)
@@ -566,9 +478,10 @@ if __name__ == '__main__':
     print("Total items (in inters):", len(item2index))
     print("Total interactions:", len(rating_inters))
     write_json_file(item2feature, os.path.join(output_dataset_path, f'{args.dataset}.item.json'))
-    
+    write_review_file(args, rating_inters, review_details, user2index, item2index)
+
     # 保存映射文件
     write_remap_index(user2index, os.path.join(output_dataset_path, f'{args.dataset}.user2id'))
     write_remap_index(item2index, os.path.join(output_dataset_path, f'{args.dataset}.item2id'))
-    
+
     print(f"\nFinished processing dataset: {args.dataset}")

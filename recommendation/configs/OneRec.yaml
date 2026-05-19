@@ -1,4 +1,4 @@
-# 檔案路徑: configs/OneRec.yaml
+# 文件路径: configs/OneRec.yaml
 
 # OneRec 模型独有的架构参数
 model_params:

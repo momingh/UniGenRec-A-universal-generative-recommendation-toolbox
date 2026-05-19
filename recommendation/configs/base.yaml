@@ -1,6 +1,6 @@
-# 檔案路徑: configs/base.yaml
+# 文件路径: configs/base.yaml
 
-# 訓練相關的通用預設值
+# 训练相关的通用默认值
 training_params:
   lr: 0.0001
   batch_size: 128
@@ -9,19 +9,19 @@ training_params:
   seed: 2023
   device: 'cuda:0'
   num_workers: 4
-  eval_interval: 5
+  eval_interval: 1
   weight_decay: 0.01
 
 model_params:
   max_len: 20
 
-# 評估相關的通用預設值
+# 评估相关的通用默认值
 evaluation_params:
   topk_list: [5, 10, 20]
   beam_size: 20
   batch_size: 32
 
-# 所有模型共享的路徑模板
+# 所有模型共享的路径模板
 paths:
   dataset_root: "../datasets/{dataset_name}"
   output_root: "../ckpt/recommendation/{dataset_name}/{model_name}_{quant_method}"

@@ -1,0 +1,52 @@
+common:
+  device: 'cuda:0'
+  eval_interval: 50
+  validation_split: -1
+  seed: 42
+  num_workers: 4
+  predict_batch_size: 2048
+
+# --- RQ-VAE + FAISS RQ 初始化配置 ---
+rqvae_faiss:
+  model_params:
+    # 残差修正网络 f(x) 的隐藏层；encoder 输出为 z = x + f(x)。
+    hidden_sizes: [512, 256]
+    # RQVAE_FAISS 直接在原始 item embedding 空间训练 FAISS；null 表示自动使用 input_size。
+    latent_size: null
+    # 残差量化层数；最终每个 item 会得到 num_levels 个离散 code。
+    num_levels: 4
+    # 去重层使用的词表大小，也是 Trainer 的兼容字段；如果 has_dup_layer=true，会用它生成追加的去重 ID。
+    codebook_size: 256
+    # 每一层 RQ codebook 的大小；长度必须等于 num_levels，每个值必须是 2 的幂。
+    codebook_sizes: [256, 256, 256, 256]
+    # 是否在预测码本时追加一层去重 ID；用于区分基础 code 完全相同的 item。
+    has_dup_layer: true
+    # MLP 中 Linear 层前的 dropout 概率；越大正则越强，但可能欠拟合。
+    dropout: 0.1
+    # 是否在隐藏层使用 BatchNorm1d；小 batch 或分布变化大时可能不稳定。
+    bn: false
+    # 每个量化层使用 Sinkhorn 分配时的 epsilon；长度必须等于 num_levels，0 表示退化为 argmin 最近邻。
+    sk_epsilons: [0.0, 0.0, 0.0, 0.0]
+    # Sinkhorn 分配的迭代次数，仅当对应层 sk_epsilon > 0 时实际影响分配。
+    sk_iters: 100
+    # 初始化时直接使用原始 item_embeddings 训练 FAISS ResidualQuantizer，不经过 encoder。
+    # 是否打印 FAISS ResidualQuantizer 训练信息。
+    faiss_verbose: true
+
+  training_params:
+    # VQ commitment loss 权重；越大越强制 encoder 输出贴近选中的 code 向量。
+    beta: 0.25
+    # 重构损失类型；mse 使用均方误差，l1 使用平均绝对误差。
+    loss_type: "mse"
+    # 量化损失在总 loss 中的权重；总损失 = 重构损失 + quant_loss_weight * 量化损失。
+    quant_loss_weight: 1.0
+    # 每个训练 batch 的 item embedding 数量；越大越能覆盖 codebook，但显存占用越高。
+    batch_size: 2048
+    # 完整遍历训练集的次数；RQ-VAE 通常需要较多 epoch 才能稳定。
+    epochs: 2000
+    # 优化器学习率；过大可能震荡，过小收敛慢。
+    lr: 0.001
+    # AdamW 的权重衰减系数；用于限制参数过大，过高会削弱拟合能力。
+    weight_decay: 0.0001
+    # torch.optim 中的优化器类名；Trainer 会用 getattr(torch.optim, optimizer) 创建。
+    optimizer: "AdamW"

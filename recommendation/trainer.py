@@ -8,7 +8,7 @@ import logging
 # trainer 不再需要关心 metrics 的具体实现
 # from metrics import ... (这些引用可以删除了)
 
-def train_one_epoch(model, train_loader, optimizer, device):
+def train_one_epoch(model, train_loader, optimizer, device, scheduler=None, max_grad_norm=None):
     """执行一个训练周期 (此函数不变)"""
     model.train()
     total_loss = 0.0
@@ -17,11 +17,15 @@ def train_one_epoch(model, train_loader, optimizer, device):
         optimizer.zero_grad()
         outputs = model.forward(batch)
         if isinstance(outputs, dict):
-            loss = outputs['loss']  # 處理 RPG 這類返回字典的模型
+            loss = outputs['loss']  # 处理 RPG 這类返回字典的模型
         else:
-            loss = outputs.loss      # 處理 TIGER 這類返回物件的模型
+            loss = outputs.loss      # 处理 TIGER 這类返回物件的模型
         loss.backward()
+        if max_grad_norm is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         total_loss += loss.item()
     return total_loss / len(train_loader)
 

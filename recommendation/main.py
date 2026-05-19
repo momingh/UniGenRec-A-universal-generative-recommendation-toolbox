@@ -1,13 +1,12 @@
 import argparse
 import logging
+import math
 import torch
 import torch.optim as optim
-import os
 import pprint
-from collections import Counter
 from typing import Optional # ✅ (新增) 导入 Optional
 
-# ✅ 1. 從 torch.utils.data 直接導入 DataLoader
+# ✅ 1. 从 torch.utils.data 直接导入 DataLoader
 from torch.utils.data import DataLoader 
 from dataset import GenRecDataset, item2code
 from tokenizer import get_tokenizer       
@@ -17,7 +16,6 @@ from utils import (
     setup_logging,
     set_seed,
     get_model_class,
-    load_item_category_map,
 )
 
 import sys
@@ -33,12 +31,45 @@ if str(root_parent) not in sys.path:
 from recommendation.models.generation.prefix_tree import Trie, build_trie_from_codebook
 
 
+def build_lr_scheduler(optimizer, train_loader, training_params):
+    scheduler_name = training_params.get('scheduler')
+    if scheduler_name is None:
+        scheduler_name = training_params.get('lr_scheduler')
+    if scheduler_name is None:
+        return None
+
+    scheduler_name = str(scheduler_name).lower()
+    if scheduler_name in {'none', 'null', 'false'}:
+        return None
+    if scheduler_name != 'cosine':
+        raise ValueError(f"Unsupported scheduler: {scheduler_name}")
+
+    warmup_steps = int(training_params.get('warmup_steps', 0) or 0)
+    total_steps = training_params.get('total_steps', training_params.get('steps'))
+    if total_steps is None:
+        total_steps = len(train_loader) * int(training_params['num_epochs'])
+    total_steps = int(total_steps)
+    if total_steps <= 0:
+        return None
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    logging.info(
+        f"Using cosine LR scheduler: warmup_steps={warmup_steps}, total_steps={total_steps}"
+    )
+    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
 def main():
-    # === 1. 解析命令列參數 ===
+    # === 1. 解析命令列参数 ===
     parser = argparse.ArgumentParser(description="GenRec Universal Training Pipeline")
-    parser.add_argument('--model', type=str,default="AdaDiff", help='模型名稱 (e.g., TIGER, GPT2, RPG)')
+    parser.add_argument('--model', type=str, default="TIGER", help='模型名稱 (e.g., TIGER, GPT2, RPG)')
     parser.add_argument('--dataset', type=str, default="amazon-musical-instruments-23", help='数据集名稱 (e.g., Beauty)')
-    parser.add_argument('--quant_method', type=str, default="rqvae", choices=['rkmeans', 'rvq', 'rqvae', 'opq', 'pq', 'vqvae', 'mm_rqvae'], help='量化方法')
+    parser.add_argument('--quant_method', type=str, default="rqvae", choices=['rqvae', 'rqvae_faiss', 'opq', 'qinco', 'rqkmeans', 'rqkmeans_plus'], help='量化方法')
     parser.add_argument('--embedding_modality', type=str, default='text', choices=['text', 'image', 'fused', 'lfused', 'cf'], help='量化模态类型，对应不同的 codebook (默认 text)')
     parser.add_argument('--eval_only', action='store_true', help='仅加载已有模型，在测试集上直接评估')
 
@@ -49,7 +80,7 @@ def main():
     eval_only = args.eval_only
 
 
-    # === 2. 載入並處理設定檔 ===
+    # === 2. 载入并处理配置文件 ===
     config = load_and_process_config(
         args.model, 
         args.dataset, 
@@ -59,7 +90,7 @@ def main():
     ckpt_override = config['save_path']
     print(f"ckpt_override: {ckpt_override}") 
 
-    # === 3. 初始化 (日誌, 隨機種子) ===
+    # === 3. 初始化 (日志, 随机种子) ===
     setup_logging(config['log_path'])
     set_seed(config['training_params']['seed'])
     logging.info(f"Configuration loaded for {args.model} on {args.dataset} with {args.quant_method}.")
@@ -68,39 +99,20 @@ def main():
     logging.info("\n" + config_str)
     logging.info("=" * 50)
 
-    # === 4. 設定設備 ===
+    # === 4. 设置设备 ===
     device = torch.device(config['training_params']['device'] if torch.cuda.is_available() else 'cpu')
     logging.info(f"Using device: {device}")
     num_workers = config['training_params'].get('num_workers', 4)
     
     # === 5. ✅ (顺序调整) 载入 item_to_code 映射 ===
-    # (必须在创建模型之前完成，因为Trie依赖它)
+    # (必须在创建模型之前完成，因为 Trie 依赖它)
     logging.info("Loading item to code mapping...")
-    item_to_code_map, code_to_item_map = item2code(
+    item_to_code_map, _ = item2code(
         config['code_path'],
         config['vocab_sizes'],
         config['bases']
     )
     logging.info(f"Item to code map loaded. Total items mapped: {len(item_to_code_map)}")
-    dataset_root = Path(config['train_json']).parent
-    item_to_cate_map, cate_id_to_name = load_item_category_map(
-        dataset_root,
-        args.dataset,
-        return_cate_names=True,
-        min_items_per_cate=10,
-        max_categories=30,
-    )
-    if item_to_cate_map:
-        cate_counter = Counter(item_to_cate_map.values())
-        total = sum(cate_counter.values())
-        lines = []
-        for cid, cnt in cate_counter.most_common():
-            name = cate_id_to_name.get(cid, str(cid))
-            ratio = (cnt / total) if total else 0
-            lines.append(f"{name}: {cnt} ({ratio:.2%})")
-        logging.info("[Diversity] Category distribution:\n" + "\n".join(lines))
-    else:
-        logging.info("[Diversity] Category map is empty; skip distribution logging.")
 
     # === 6. ✅ (修改) 根据 config 构建前缀树 ===
     prefix_trie: Optional[Trie] = None
@@ -128,28 +140,13 @@ def main():
         logging.info("Prefix Trie is DISABLED (default or as per config).")
 
 
-    # === 7. ✅ (修改) 创建模型 (将Trie注入) ===
+    # === 7. ✅ (修改) 创建模型 (将 Trie 注入) ===
     logging.info(f"Dynamically loading model: {args.model}")
     ModelClass = get_model_class(args.model)
     
     # ✅ (修改) 将 config 和 prefix_trie (可能是 None) 传递给模型
     #    (我们假设 ModelClass 的 __init__ 接受 prefix_trie=None)
-    model_kwargs = {"prefix_trie": prefix_trie}
-    if args.model.upper() == "ADADIFF":
-        model_kwargs.update(
-            {
-                "item_to_code_map": item_to_code_map,
-                "code_to_item_map": code_to_item_map,
-                "item_to_cate_map": item_to_cate_map,
-            }
-        )
-    elif args.model.upper() == "LCREC":
-        model_kwargs.update(
-            {
-                "item_to_code_map": item_to_code_map,
-            }
-        )
-    model = ModelClass(config, **model_kwargs) 
+    model = ModelClass(config, prefix_trie=prefix_trie)
     
     model.to(device)
     logging.info(model.n_parameters)
@@ -165,22 +162,14 @@ def main():
 
     # === 8. (顺序调整) 初始化模型专属的 Tokenizer ===
     logging.info(f"Initializing tokenizer for model: {args.model}")
-    tokenizer_collate_fn = get_tokenizer(
+    collate_fn = get_tokenizer(
         model_name=args.model,
         config=config,
         item_to_code_map=item_to_code_map
     )
     logging.info("Tokenizer initialized.")
 
-    # 支持部分模型區分訓練/評估兩種 tokenizer
-    if isinstance(tokenizer_collate_fn, dict):
-        train_collate_fn = tokenizer_collate_fn.get('train')
-        eval_collate_fn = tokenizer_collate_fn.get('eval', train_collate_fn)
-    else:
-        train_collate_fn = tokenizer_collate_fn
-        eval_collate_fn = tokenizer_collate_fn
-
-    # === 9. (顺序调整) 創建數據集與 DataLoader ===
+    # === 9. (顺序调整) 创建数据集与 DataLoader ===
     logging.info("Creating Datasets...")
     if eval_only:
         test_dataset = GenRecDataset(config=config, mode='test')
@@ -194,7 +183,7 @@ def main():
     is_gpu_training = (torch.cuda.is_available() and num_workers > 0)
     loader_kwargs = {
         "num_workers": num_workers,
-        "collate_fn": train_collate_fn, # 默認使用訓練 tokenizer
+        "collate_fn": collate_fn,
         "pin_memory": is_gpu_training,
         "persistent_workers": is_gpu_training if num_workers > 0 else False
     }
@@ -204,7 +193,7 @@ def main():
             test_dataset,
             batch_size=config['evaluation_params']['batch_size'],
             shuffle=False, 
-            collate_fn=eval_collate_fn,
+            collate_fn=collate_fn,
             num_workers=num_workers,
             pin_memory=is_gpu_training,
             persistent_workers=is_gpu_training if num_workers > 0 else False
@@ -220,7 +209,7 @@ def main():
             validation_dataset,
             batch_size=config['evaluation_params']['batch_size'],
             shuffle=False, 
-            collate_fn=eval_collate_fn,
+            collate_fn=collate_fn,
             num_workers=num_workers,
             pin_memory=is_gpu_training,
             persistent_workers=is_gpu_training if num_workers > 0 else False
@@ -229,7 +218,7 @@ def main():
             test_dataset,
             batch_size=config['evaluation_params']['batch_size'],
             shuffle=False, 
-            collate_fn=eval_collate_fn,
+            collate_fn=collate_fn,
             num_workers=num_workers,
             pin_memory=is_gpu_training,
             persistent_workers=is_gpu_training if num_workers > 0 else False
@@ -238,10 +227,6 @@ def main():
     # === 10. Eval-Only 快捷路径 ===
     if eval_only:
         ckpt_path = Path(ckpt_override) if ckpt_override else Path(config['save_path'])
-        if args.model.upper() == "LCREC" and not ckpt_path.exists():
-            candidate_dir = ckpt_path.with_suffix("")
-            if candidate_dir.exists():
-                ckpt_path = candidate_dir
         if not ckpt_path.exists():
             logging.error(f"[Eval-Only] Checkpoint not found: {ckpt_path}")
             return
@@ -263,6 +248,12 @@ def main():
         logging.info(f"[Eval-Only] Test Results: {test_results}")
         return
 
+    scheduler = build_lr_scheduler(optimizer, train_loader, config['training_params'])
+    max_grad_norm = config['training_params'].get('max_grad_norm')
+    if max_grad_norm is not None:
+        max_grad_norm = float(max_grad_norm)
+        logging.info(f"Gradient clipping enabled: max_grad_norm={max_grad_norm}")
+
     # === 11. (顺序调整) 训练-评估循环 (已修改) ===
     best_ndcg = 0.0
     early_stop_counter = 0
@@ -278,7 +269,14 @@ def main():
         logging.info(f"--- Epoch {epoch_num}/{config['training_params']['num_epochs']} ---")
         
         # --- 训练 ---
-        train_loss = train_one_epoch(model, train_loader, optimizer, device)
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            scheduler=scheduler,
+            max_grad_norm=max_grad_norm
+        )
         logging.info(f"Training loss: {train_loss:.4f}")
 
         # --- 评估 (根据 eval_interval) ---
@@ -312,14 +310,8 @@ def main():
                 best_val_results = val_results
                 best_test_results = test_results
 
-                if hasattr(model, "save_pretrained") and args.model.upper() == "LCREC":
-                    ckpt_dir = Path(config['save_path']).with_suffix("")
-                    ckpt_dir.mkdir(parents=True, exist_ok=True)
-                    model.save_pretrained(str(ckpt_dir))
-                    logging.info(f"Best model saved to {ckpt_dir}")
-                else:
-                    torch.save(model.state_dict(), config['save_path'])
-                    logging.info(f"Best model saved to {config['save_path']}")
+                torch.save(model.state_dict(), config['save_path'])
+                logging.info(f"Best model saved to {config['save_path']}")
             
             else:
                 early_stop_counter += eval_interval 
@@ -330,7 +322,7 @@ def main():
         else:
             logging.info(f"Skipping evaluation for Epoch {epoch_num}.")
 
-    # === 12. (顺序调整) 訓練結束總結 ===
+    # === 12. (顺序调整) 训练结束总结 ===
     logging.info("="*50)
     logging.info("🏁 Training Finished!")
     if best_test_results:

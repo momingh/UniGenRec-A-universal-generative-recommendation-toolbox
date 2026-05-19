@@ -1,16 +1,14 @@
 import json
-from pathlib import Path
-from typing import Dict, List
+from typing import Iterator
 
 import numpy as np
-import pandas as pd
 from torch.utils.data import Dataset
 
 
-def pad_or_truncate(sequence, max_len, PAD_TOKEN=0):
+def truncate_sequence(sequence, max_len):
     if len(sequence) > max_len:
         return sequence[-max_len:]
-    return [PAD_TOKEN] * (max_len - len(sequence)) + sequence
+    return sequence
 
 
 def item2code(code_path, vocab_sizes, bases):
@@ -39,142 +37,89 @@ def item2code(code_path, vocab_sizes, bases):
     return item_to_code, code_to_item
 
 
-def process_parquet(file_path, mode, max_len, PAD_TOKEN=0):
-    df = pd.read_parquet(file_path)
-    df["sequence"] = df["history"].apply(lambda x: list(x)) + df["target"].apply(lambda x: [x])
-
-    processed_data = []
-    if mode == "train":
-        for row in df.itertuples(index=False):
-            sequence = row.sequence
-            for i in range(1, len(sequence)):
-                processed_data.append(
-                    {
-                        "history": pad_or_truncate(sequence[:i], max_len, PAD_TOKEN),
-                        "target": sequence[i],
-                    }
-                )
-    elif mode == "evaluation":
-        for row in df.itertuples(index=False):
-            sequence = row.sequence
-            processed_data.append(
-                {
-                    "history": pad_or_truncate(sequence[:-1], max_len, PAD_TOKEN),
-                    "target": sequence[-1],
-                }
-            )
-    else:
-        raise ValueError("Mode must be 'train' or 'evaluation'.")
-    return processed_data
-
-
-def process_jsonl(file_path, max_len, PAD_TOKEN=0):
-    processed = []
+def _load_jsonl(file_path) -> Iterator[dict]:
     with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            history = [int(x) for x in obj.get("history", [])]
-            target = int(obj.get("target"))
-            processed.append(
-                {
-                    "history": pad_or_truncate(history, max_len, PAD_TOKEN),
-                    "target": target,
-                }
-            )
-    return processed
+            if line:
+                yield json.loads(line)
 
 
-def process_instruction_jsonl(file_path):
-    processed = []
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            processed.append(json.loads(line))
-    return processed
-
-
-def _offset_token_to_special_token(token_id: int, bases: List[int], level: int) -> str:
-    semantic_value = token_id - bases[level] - 1
-    return f"<SID_{level}_{semantic_value}>"
-
-
-def _item_to_semantic_text(item_id_0based: int, item_to_code_map: Dict[int, List[int]], bases: List[int]) -> str:
-    code_tokens = item_to_code_map[item_id_0based + 1]
-    semantic_tokens = [
-        _offset_token_to_special_token(token_id, bases, level)
-        for level, token_id in enumerate(code_tokens)
+def process_jsonl(file_path, max_len):
+    return [
+        {
+            "history": truncate_sequence(
+                [int(x) for x in obj.get("history", [])],
+                max_len,
+            ),
+            "target": int(obj["target"]),
+        }
+        for obj in _load_jsonl(file_path)
     ]
-    return " ".join(semantic_tokens)
 
 
-def _history_to_semantic_input(
-    history_ids: List[int],
-    item_to_code_map: Dict[int, List[int]],
-    bases: List[int],
-    history_sep: str,
-    add_prefix: bool,
-) -> str:
-    item_strings = [_item_to_semantic_text(item_id, item_to_code_map, bases) for item_id in history_ids]
-    if add_prefix:
-        item_strings = [f"{idx + 1}. {value}" for idx, value in enumerate(item_strings)]
-    return history_sep.join(item_strings) if item_strings else "None"
+def process_rpg_jsonl(file_path, mode, max_len):
+    if mode == "train":
+        return process_rpg_train_jsonl(file_path, max_len)
+
+    return [
+        {"item_seq": [*map(int, obj.get("history", [])), int(obj["target"])]}
+        for obj in _load_jsonl(file_path)
+        if len(obj.get("history", [])) > 0
+    ]
 
 
-def ensure_lcrec_instruction_jsonl(config: dict, mode: str) -> Path:
-    output_path = Path(config[f"{mode}_instruction_json"])
-    source_path = Path(config[f"{mode}_json"])
-    if not source_path.is_file():
-        raise FileNotFoundError(f"LCRec source jsonl not found: {source_path}")
-    if output_path.is_file() and output_path.stat().st_mtime >= source_path.stat().st_mtime:
-        return output_path
+def _expand_rpg_train_sequence(item_seq, max_len):
+    n_return_examples = max(len(item_seq) - max_len, 1)
+    first_window = item_seq[: min(len(item_seq), max_len + 1)]
+    examples = [{"item_seq": first_window, "label_all_positions": True}]
 
-    item_to_code_map, _ = item2code(
-        config["code_path"],
-        config["vocab_sizes"],
-        config["bases"],
-    )
-    model_params = config["model_params"]
-    instruction_template = model_params.get(
-        "instruction_template",
-        "Predict the next item Semantic ID from the user's historical interactions.",
-    )
-    history_sep = model_params.get("history_sep", ", ")
-    add_prefix = model_params.get("history_add_index_prefix", False)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(source_path, "r", encoding="utf-8") as src, open(output_path, "w", encoding="utf-8") as dst:
-        for line in src:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            history = [int(x) for x in obj.get("history", [])]
-            target = int(obj["target"])
-
-            input_text = _history_to_semantic_input(
-                history,
-                item_to_code_map,
-                config["bases"],
-                history_sep,
-                add_prefix,
-            )
-            output_text = _item_to_semantic_text(target, item_to_code_map, config["bases"])
-            record = {
-                "task": "seqrec",
-                "instruction": instruction_template,
-                "input": input_text,
-                "output": output_text,
-                "target_item": target,
-                "target_semantic_id": output_text,
+    for start in range(1, n_return_examples):
+        examples.append(
+            {
+                "item_seq": item_seq[start : start + max_len + 1],
+                "label_all_positions": False,
             }
-            json.dump(record, dst, ensure_ascii=False)
-            dst.write("\n")
-    return output_path
+        )
+    return examples
+
+
+def process_rpg_train_jsonl(file_path, max_len):
+    user_to_seq = {}
+    user_order = []
+    userless_seqs = []
+
+    for obj in _load_jsonl(file_path):
+        history = [int(x) for x in obj.get("history", [])]
+        target = int(obj["target"])
+        item_seq = history + [target]
+        if len(item_seq) < 2:
+            continue
+
+        user = obj.get("user")
+        if user is None:
+            userless_seqs.append(item_seq)
+            continue
+
+        if user not in user_to_seq:
+            user_to_seq[user] = item_seq
+            user_order.append(user)
+            continue
+
+        # train.jsonl is written in per-user prefix-target order. This restores
+        # the original train sequence while still detecting shuffled records.
+        expected_history = user_to_seq[user][-len(history):] if history else []
+        if expected_history != history:
+            raise ValueError(
+                f"RPG train records for user {user} are not in prefix order; "
+                "cannot restore the full training sequence from train.jsonl."
+            )
+        user_to_seq[user].append(target)
+
+    examples = []
+    for item_seq in [*[user_to_seq[user] for user in user_order], *userless_seqs]:
+        examples.extend(_expand_rpg_train_sequence(item_seq, max_len))
+    return examples
 
 
 class GenRecDataset(Dataset):
@@ -183,13 +128,13 @@ class GenRecDataset(Dataset):
         self.mode = mode
         self.model_name = self.config["model_name"].upper()
         self.max_len = self.config["model_params"]["max_len"]
-
-        if self.model_name == "LCREC":
-            self.dataset_path = ensure_lcrec_instruction_jsonl(self.config, mode)
-            self.data = process_instruction_jsonl(self.dataset_path)
+        self.dataset_path = self.config[f"{mode}_json"]
+        if self.model_name == "RPG":
+            self.data = process_rpg_jsonl(self.dataset_path, mode, self.max_len)
+            for item in self.data:
+                item["mode"] = mode
         else:
-            self.dataset_path = self.config[f"{mode}_json"]
-            self.data = process_jsonl(self.dataset_path, self.max_len, PAD_TOKEN=0)
+            self.data = process_jsonl(self.dataset_path, self.max_len)
 
     def __len__(self):
         return len(self.data)
