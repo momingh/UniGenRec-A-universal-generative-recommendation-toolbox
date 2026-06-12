@@ -85,6 +85,8 @@ class RPG(AbstractModel):
         self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100) 
         self._debug_printed_forward = False # Debug flag
 
+        self.norm = nn.LayerNorm(448)
+
     @property
     def task_type(self) -> str: return 'retrieval'
 

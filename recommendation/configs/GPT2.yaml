@@ -1,25 +1,44 @@
-# 文件路径: configs/SIMPLE_GPT.yaml
+# 文件路径: configs/GPT2.yaml
 
-# SIMPLE_GPT 模型独有的架构参数
+# GPT2 模型独有的架构参数
 model_params:
-  # max_len 来自 base.yaml，這里可以覆盖或不写
-  # max_len: 20       
+  # max_len 来自 base.yaml，这里可以覆盖或不写
+  # max_len: 20
 
   # GPT-2 架构参数
   n_embd: 512       # Embedding 维度
   n_layer: 6        # Transformer 层数
   n_head: 8         # 注意力头的数量
-  n_inner: 2048     # FFN 层的中間维度
-  
+  n_inner: 2048     # FFN 层的中间维度
+
   # Dropout 参数 (可选，若不写则使用 GPT2Config 默认值)
   resid_pdrop: 0.1
   embd_pdrop: 0.1
   attn_pdrop: 0.1
-  
+
   # 其他 GPT-2 参数 (可选)
+  activation_function: gelu_new  # 激活函数
   layer_norm_epsilon: 1e-5
   initializer_range: 0.02
 
+# 训练参数
 training_params:
-  lr: 0.0001 
-  batch_size: 1024
+  lr: 0.0001
+  batch_size: 256
+  num_epochs: 200        # 最大训练轮数
+  early_stop: 10         # 早停轮数
+  seed: 2023             # 随机种子
+  device: 'cuda:0'       # 设备
+  num_workers: 4         # 数据加载线程数
+  eval_interval: 5       # 每 5 个 epoch 评估一次
+  weight_decay: 0.01     # 权重衰减
+  # 可选: 学习率调度器配置
+  # scheduler: cosine
+  # warmup_steps: 1000
+  # max_grad_norm: 1.0
+
+# 评估参数
+evaluation_params:
+  topk_list: [5, 10, 20]  # 评估的 top-k 指标
+  beam_size: 20           # beam search 大小
+  batch_size: 512         # 评估时的批次大小

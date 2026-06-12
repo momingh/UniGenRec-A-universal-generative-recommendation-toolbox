@@ -75,6 +75,7 @@ class RQVAE_FAISS(nn.Module):
             codebook_sizes=codebook_sizes,
             verbose=faiss_verbose,
         )
+        self._report_init_stats(item_embeddings=item_embeddings, codebook_sizes=codebook_sizes)
 
     @staticmethod
     def _zero_init_last_linear(module):
@@ -106,6 +107,55 @@ class RQVAE_FAISS(nn.Module):
         copy_codebooks_to_embeddings(codebooks, embeddings, label="RQ-VAE")
         for quantizer in self.rq.vq_layers:
             quantizer.initted = True
+
+    @torch.no_grad()
+    def _report_init_stats(self, item_embeddings, codebook_sizes, batch_size=4096):
+        """初始化后统计每层 codebook 利用率与 semantic id 的重复率。"""
+        was_training = self.training
+        self.eval()
+        try:
+            data = as_float32_numpy(item_embeddings)
+            device = self.rq.vq_layers[0].embedding.weight.device
+            data = torch.from_numpy(data).to(device)
+
+            num_items = data.shape[0]
+            all_indices = []
+            for start in range(0, num_items, batch_size):
+                batch = data[start:start + batch_size]
+                # 编码器最后一层零初始化, 此时 encoder(x) == x
+                indices = self.get_codes(x=batch, use_sk=False)
+                all_indices.append(indices.cpu())
+            all_indices = torch.cat(all_indices, dim=0)  # [num_items, num_levels]
+        finally:
+            if was_training:
+                self.train()
+
+        logging.info("[RQVAE_FAISS] 初始化统计 (共 %d 个 item):", num_items)
+
+        # 每层 codebook 利用率
+        for layer_idx, codebook_size in enumerate(codebook_sizes):
+            used = torch.unique(all_indices[:, layer_idx]).numel()
+            usage = used / codebook_size
+            logging.info(
+                "[RQVAE_FAISS]   第 %d/%d 层利用率: %d/%d = %.4f",
+                layer_idx + 1,
+                len(codebook_sizes),
+                used,
+                codebook_size,
+                usage,
+            )
+
+        # semantic id 重复率 (整条 code 序列冲突)
+        unique_sids = torch.unique(all_indices, dim=0).shape[0]
+        num_collision = num_items - unique_sids
+        collision_rate = num_collision / num_items if num_items > 0 else 0.0
+        logging.info(
+            "[RQVAE_FAISS]   唯一 SID 数: %d/%d, 冲突数: %d, 重复率: %.4f",
+            unique_sids,
+            num_items,
+            num_collision,
+            collision_rate,
+        )
 
     def forward(self, x=None, xs=None, use_sk=True):
         if x is None:

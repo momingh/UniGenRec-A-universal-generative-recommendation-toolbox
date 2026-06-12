@@ -45,6 +45,9 @@ def build_lr_scheduler(optimizer, train_loader, training_params):
         raise ValueError(f"Unsupported scheduler: {scheduler_name}")
 
     warmup_steps = int(training_params.get('warmup_steps', 0) or 0)
+    # hold_steps: 在 warmup 之后、余弦退火之前，让学习率恒定在峰值 (base lr) 的步数。
+    # 例如 hold_steps=10000 表示前 10000 步保持 lr=0.01，之后才开始余弦衰减。
+    hold_steps = int(training_params.get('hold_steps', 0) or 0)
     total_steps = training_params.get('total_steps', training_params.get('steps'))
     if total_steps is None:
         total_steps = len(train_loader) * int(training_params['num_epochs'])
@@ -52,14 +55,23 @@ def build_lr_scheduler(optimizer, train_loader, training_params):
     if total_steps <= 0:
         return None
 
+    # 余弦退火阶段的起点 = warmup + hold
+    decay_start = warmup_steps + hold_steps
+
     def lr_lambda(current_step):
+        # 阶段 1: 线性 warmup (warmup_steps=0 时跳过)
         if current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
-        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        # 阶段 2: 恒定保持峰值学习率
+        if current_step < decay_start:
+            return 1.0
+        # 阶段 3: 余弦退火 从 1.0 -> 0.0
+        progress = float(current_step - decay_start) / float(max(1, total_steps - decay_start))
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
     logging.info(
-        f"Using cosine LR scheduler: warmup_steps={warmup_steps}, total_steps={total_steps}"
+        f"Using cosine LR scheduler: warmup_steps={warmup_steps}, "
+        f"hold_steps={hold_steps}, decay_start={decay_start}, total_steps={total_steps}"
     )
     return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -140,13 +152,13 @@ def main():
         logging.info("Prefix Trie is DISABLED (default or as per config).")
 
 
-    # === 7. ✅ (修改) 创建模型 (将 Trie 注入) ===
+    # === 7. ✅ (修改) 创建模型 (将 Trie 和 item_to_code_map 注入) ===
     logging.info(f"Dynamically loading model: {args.model}")
     ModelClass = get_model_class(args.model)
-    
-    # ✅ (修改) 将 config 和 prefix_trie (可能是 None) 传递给模型
-    #    (我们假设 ModelClass 的 __init__ 接受 prefix_trie=None)
-    model = ModelClass(config, prefix_trie=prefix_trie)
+
+    # ✅ (修改) 将 config, prefix_trie, item_to_code_map 传递给模型
+    # item_to_code_map 供 TIGERLogitsProcessor 使用
+    model = ModelClass(config, prefix_trie=prefix_trie, item_to_code_map=item_to_code_map)
     
     model.to(device)
     logging.info(model.n_parameters)

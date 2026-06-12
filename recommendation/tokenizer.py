@@ -77,7 +77,24 @@ class GenerativeTokenizer(BaseTokenizer):
         if padding_side not in ('left', 'right'):
             raise ValueError("padding_side 必須是 'left' 或 'right'")
         self.padding_side = padding_side
-        logger.info(f"GenerativeTokenizer 初始化, padding_side='{padding_side}'")
+        # user token (对齐 NonameUntitled/tiger): 仅当 config 划分了 user 区间时启用
+        self.user_ids_count = int(config.get('user_ids_count', 0) or 0)
+        self.user_token_base = config.get('user_token_base')
+        self.use_user_token = self.user_ids_count > 0 and self.user_token_base is not None
+        logger.info(
+            f"GenerativeTokenizer 初始化, padding_side='{padding_side}', "
+            f"use_user_token={self.use_user_token}"
+            + (f" (user_ids_count={self.user_ids_count}, base={self.user_token_base})"
+               if self.use_user_token else "")
+        )
+
+    def _user_token_id(self, user: Any) -> int:
+        """把原始 user id 哈希到 [0, user_ids_count) 再加偏移落入专属词表区。
+        用 hashlib 而非内置 hash(),保证跨进程稳定(否则 user embedding 每次启动都漂移)。"""
+        import hashlib
+        digest = hashlib.md5(str(user).encode('utf-8')).hexdigest()
+        bucket = int(digest, 16) % self.user_ids_count
+        return self.user_token_base + bucket
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
 
@@ -106,6 +123,11 @@ class GenerativeTokenizer(BaseTokenizer):
 
             # 3. 压平 *有效* Code Token 序列
             seq_flat_valid = [code for item_codes in valid_hist_codes for code in item_codes]
+
+            # 3.1 (可选) 在序列末尾追加 user token (对齐 repo:user token 拼在 encoder 输入尾部)
+            if self.use_user_token and item.get('user') is not None:
+                seq_flat_valid = seq_flat_valid + [self._user_token_id(item['user'])]
+
             logger.debug(f"Sample {i} Flattened Valid Codes (len={len(seq_flat_valid)}): {seq_flat_valid[:20]}...{seq_flat_valid[-20:]}")
 
             batch_sequences_flat_valid.append(torch.tensor(seq_flat_valid, dtype=torch.long))

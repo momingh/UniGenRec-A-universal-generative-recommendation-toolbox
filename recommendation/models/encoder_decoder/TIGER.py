@@ -1,5 +1,3 @@
-# models/tiger.py (遵守新契约)
-
 from typing import Any, Dict, List, Optional
 import torch
 import logging
@@ -14,41 +12,61 @@ if str(root) not in sys.path:
 
 from recommendation.metrics import recall_at_k, ndcg_at_k
 from recommendation.models.generation.prefix_tree import Trie
+from recommendation.models.generation.logits_processor import TIGERLogitsProcessor
 from recommendation.models.abstract_model import AbstractModel
+from transformers.generation.logits_process import LogitsProcessorList
 
 
 
 T5ForConditionalGeneration = transformers.T5ForConditionalGeneration
 T5Config = transformers.T5Config
 
-# TIGER 现在继承自我们定义好的 ABC
+
 class TIGER(AbstractModel):
   
   def __init__(
-      self, 
-      config: Dict[str, Any], 
-      prefix_trie: Optional[Trie] = None
+      self,
+      config: Dict[str, Any],
+      prefix_trie: Optional[Trie] = None,
+      item_to_code_map: Optional[Dict[int, List[int]]] = None
   ):
     super().__init__(config)
-    # ... (初始化代码完全不变)
     model_params = config['model_params']
     token_params = config['token_params']
+    t5_model_params = {
+        k: v for k, v in model_params.items()
+        if k != 'num_epochs'
+    }
     t5config = T5Config(
-        **model_params,
+        **t5_model_params,
         **token_params,
-        decoder_start_token_id=0
+        decoder_start_token_id=0,
+        use_cache=True  # 生成时缓存 key/value,避免重复计算 attention
     )
-    
+
     self.t5 = T5ForConditionalGeneration(config=t5config)
     self.t5.resize_token_embeddings(config['token_params']['vocab_size'])
-    self.n_params_str = self._calculate_n_parameters() # 在初始化时计算一次
+    self.n_params_str = self._calculate_n_parameters()
 
-    self.prefix_trie_fn = None
-    if prefix_trie is not None:
-        self.prefix_trie_fn = prefix_trie.get_allowed_next_tokens
-        logger.info("TIGER 模型已成功加载前缀树 (Prefix Trie)。")
+    self._item_to_code_map = item_to_code_map
+    if item_to_code_map:
+        logger.info(f"TIGER 已接收 item_to_code_map,包含 {len(item_to_code_map)} 个 item。")
+
+    eval_params = config.get('evaluation_params', {})
+    self.use_logits_processor = bool(
+        eval_params.get('use_logits_processor', eval_params.get('use_prefix_trie', False))
+    )
+    self.logits_processor = None
+    if self.use_logits_processor and item_to_code_map:
+        self.logits_processor = TIGERLogitsProcessor(item_to_code_map, config)
+        logger.info("TIGER 已启用 LogitsProcessor 约束解码。")
+    elif self.use_logits_processor:
+        logger.warning("TIGER 请求启用 LogitsProcessor,但未收到 item_to_code_map。")
     else:
-        logger.info("TIGER 模型未加载前缀树 (Prefix Trie)。")
+        logger.info("TIGER 未启用约束解码。")
+
+    if prefix_trie is not None:
+        logger.info("TIGER 收到 prefix_trie,但当前实现使用 LogitsProcessor 约束解码。")
 
   @property
   def task_type(self) -> str:
@@ -56,7 +74,6 @@ class TIGER(AbstractModel):
 
   @property
   def n_parameters(self) -> str:
-    # (可以覆盖基类方法以提供更详细的参数信息)
     return self.n_params_str
 
   def _calculate_n_parameters(self) -> str:
@@ -69,117 +86,98 @@ class TIGER(AbstractModel):
         f'# Total trainable parameters: {total_params:,}\n'
     )
   
-  # --- 遵守契约 ---
-
   def forward(self, batch: Dict) -> Dict:
-        """
-        【已修正】此版本会先从通用的 batch 中，只挑选出 T5 模型需要的参数，
-        然后再進行传递，以避免 TypeError。
-        """
-        # 1. 定义 T5 模型在训练时认识的参数名称
-        t5_known_args = {
-            'input_ids', 
-            'attention_mask', 
-            'labels'
-        }
-        
-        # 2. 建立一个只包含 T5 认识参数的新字典
+        t5_known_args = {'input_ids', 'attention_mask', 'labels'}
         t5_inputs = {key: value for key, value in batch.items() if key in t5_known_args}
-        
-        # 3. 将這个「干净」的字典传递給 T5 模型
         return self.t5(**t5_inputs)
 
-  # ✅ 关键修改 3: generate 函数注入 prefix_trie_fn
   def generate(self, **kwargs: Any) -> torch.Tensor:
-    """
-    【已修改】执行 T5 的标准生成。
-    如果Trie存在，则自动将其注入到 'generate' 的参数中。
-    """
-    
-    # 如果Trie已初始化，则将其 "prefix_allowed_tokens_fn" 添加到kwargs
-    if self.prefix_trie_fn is not None:
-        # 只有在 kwargs 中没有手动提供该函数时才注入
-        kwargs.setdefault('prefix_allowed_tokens_fn', self.prefix_trie_fn)
-        
+    if self.logits_processor is not None:
+        existing_processors = kwargs.pop('logits_processor', None)
+        if existing_processors is None:
+            processors = LogitsProcessorList()
+        else:
+            processors = LogitsProcessorList(list(existing_processors))
+        processors.append(self.logits_processor)
+        kwargs['logits_processor'] = processors
+
     return self.t5.generate(**kwargs)
 
   def evaluate_step(self, batch: Dict[str, torch.Tensor], topk_list: List[int]) -> Dict[str, float]:
     """
-    【已修正】封装 TIGER 专属的评估逻辑。
-    - 此版本现在返回指标的 *总和 (Sum)* 和 *批次大小 (Count)*
-    - 这将配合 trainer.py 中修正后的聚合逻辑。
+    封装 TIGER 的评估逻辑:生成 -> 匹配 -> 计算指标。
+    返回本批次指标的总和(sum)和样本数(count),供 trainer 聚合。
     """
-    # 从 config 中获取评估参数
     beam_size = self.config['evaluation_params']['beam_size']
     code_len = self.config['code_len']
+    max_k = max(topk_list)
 
-    input_ids, attention_mask, labels = batch['input_ids'], batch['attention_mask'], batch['labels']
+    # 边界检查:topk 不能超过 beam_size,否则 recall@k 会静默截断导致指标偏低
+    assert max_k <= beam_size, \
+        f"topk_list 最大值 {max_k} 超过 beam_size {beam_size}"
+
+    input_ids = batch['input_ids']
+    attention_mask = batch['attention_mask']
+    labels = batch['labels']  # (batch_size, code_len)
     device = input_ids.device
-    
-    # ✅ 1. 获取批次大小
     batch_size = input_ids.shape[0]
 
-    # 1. 生成 (调用自身的 generate)
+    # 1. 生成:beam search 输出 (batch_size * beam_size, 1 + code_len)
     preds = self.generate(
-        input_ids=input_ids, attention_mask=attention_mask,
-        num_beams=beam_size, num_return_sequences=beam_size,
-        max_new_tokens=code_len, early_stopping=False
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        num_beams=beam_size,
+        num_return_sequences=beam_size,
+        max_new_tokens=code_len,
+        early_stopping=False
     )
-    
-    # 2. 后处理
-    preds = preds[:, 1:1 + code_len].view(batch_size, beam_size, -1)
-    
-    # 3. 计算命中 (专属逻辑)
+
+    # 2. 跳过 decoder_start_token(位置0),取 code_len 个生成 token 后 reshape
+    #    -> (batch_size, beam_size, code_len)
+    preds = preds[:, 1:1 + code_len].view(batch_size, beam_size, code_len)
+
+    # 3. 命中矩阵 (batch_size, beam_size)
     pos_index = self._calculate_pos_index(preds, labels, maxk=beam_size).to(device)
 
-    # 4. 计算指标 (通用逻辑)
-    batch_metrics = {}
-    
-    # ✅ 2. 将 'count' 添加到返回的字典中
-    batch_metrics['count'] = batch_size
-    
+    # 4. 累加指标(返回 sum,由 trainer 统一除以总样本数)
+    batch_metrics = {'count': batch_size}
     for k in topk_list:
-        # ✅ 3. 计算 .sum() 而不是 .mean()
-        recall_sum = recall_at_k(pos_index, k).sum().item()
-        ndcg_sum = ndcg_at_k(pos_index, k).sum().item()
-        
-        batch_metrics[f'Recall@{k}'] = recall_sum
-        batch_metrics[f'NDCG@{k}'] = ndcg_sum
-          
+        batch_metrics[f'Recall@{k}'] = recall_at_k(pos_index, k).sum().item()
+        batch_metrics[f'NDCG@{k}'] = ndcg_at_k(pos_index, k).sum().item()
+
     return batch_metrics
   
-  # --- TIGER 专属的内部方法 ---
   @staticmethod
   def _calculate_pos_index(preds: torch.Tensor, labels: torch.Tensor, maxk: int) -> torch.Tensor:
         """
-        【与 TIGER 共享的评估逻辑】
-        假设 code 总是包含 L-1 个语义层和最后 1 个重复层。
+        计算命中矩阵:对每个样本,标记哪个 beam 完整命中了 ground-truth code。
+
+        Args:
+            preds:  (B, maxk, L_pred) 每个样本 maxk 个 beam 的预测 code
+            labels: (B, L_label)      每个样本的 ground-truth code
+            maxk:   beam 数量
+
+        Returns:
+            (B, maxk) 的 bool 张量。每行最多一个 True(取排名最靠前的命中 beam),
+            因为单正例场景下命中即停。
         """
         preds = preds.detach().cpu()
         labels = labels.detach().cpu()
-        B, _, L_pred = preds.shape
+        L_pred = preds.shape[2]
         L_label = labels.shape[1]
 
-        # 如果生成长度不足（例如提前遇到 EOS），用 padding 补齐
+        # 对齐长度:生成不足则补 0,过长则截断(正常 max_new_tokens=code_len 时两者相等)
         if L_pred < L_label:
-            padding = torch.zeros((B, maxk, L_label - L_pred), dtype=preds.dtype)
+            padding = torch.zeros((preds.shape[0], maxk, L_label - L_pred), dtype=preds.dtype)
             preds = torch.cat([preds, padding], dim=2)
-        # 如果生成长度过长，截断
         elif L_pred > L_label:
             preds = preds[:, :, :L_label]
-        
-        pos_index = torch.zeros((B, maxk), dtype=torch.bool)
-        for i in range(B):
-            gt = labels[i]
-            gt_semantic = gt[:-1].tolist()
-            gt_dup  = int(gt[-1].item())
 
-            for j in range(maxk):
-                pj = preds[i, j]
-                pj_semantic = pj[:-1].tolist()
-                pj_dup  = int(pj[-1].item())
+        # 整段逐 token 比较:(B, maxk, L) == (B, 1, L) -> 全部 token 相等才算命中
+        # full_match: (B, maxk) bool
+        full_match = (preds == labels.unsqueeze(1)).all(dim=2)
 
-                if pj_semantic == gt_semantic and pj_dup == gt_dup:
-                    pos_index[i, j] = True
-                    break
-        return pos_index
+        # 只保留每行排名最靠前的那个命中(单正例:命中即停)
+        # cumsum 后第一个 True 处累计值为 1,之后的命中被置 False
+        first_hit = full_match & (full_match.cumsum(dim=1) == 1)
+        return first_hit

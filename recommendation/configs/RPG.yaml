@@ -10,19 +10,20 @@ model_params:
   activation_function: gelu_new
   resid_pdrop: 0.0
   embd_pdrop: 0.5
-  attn_pdrop: 0.5
+  attn_pdrop: 0.7 # 0.5
   layer_norm_epsilon: 1e-12
   initializer_range: 0.02
-  temperature: 0.03
+  temperature: 0.07 # 0.03
 
 # ✨ 范例：如果 RPG 需要不同的 batch size，可以在这里覆盖 base.yaml
 training_params:
-  batch_size: 256
-  lr: 0.01
+  batch_size: 128 # 256
+  lr: 0.003 # 0.01
   weight_decay: 0.0
   scheduler: cosine
   warmup_steps: 10000
   max_grad_norm: 1.0
+  eval_interval: 1
 
 evaluation_params:
   batch_size: 512 # 评估时的 batch size

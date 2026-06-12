@@ -4,14 +4,57 @@ import gzip
 import html
 import json
 import os
-import random
 import re
-import torch
 from tqdm import tqdm
-import numpy as np
 import ast  # 用于 Amazon 2014
-# 假设 utils.py 在同一目录或 Python 路径中
-from utils import check_path, clean_text, write_json_file, write_remap_index, load_json
+
+
+def check_path(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+
+def clean_text(raw_text):
+    if isinstance(raw_text, list):
+        new_raw_text = []
+        for raw in raw_text:
+            raw = html.unescape(str(raw))
+            raw = re.sub(r'</?\w+[^>]*>', '', raw)
+            raw = re.sub(r'["\n\r]*', '', raw)
+            new_raw_text.append(raw.strip())
+        cleaned_text = ' '.join(new_raw_text)
+    else:
+        if isinstance(raw_text, dict):
+            cleaned_text = str(raw_text)[1:-1].strip()
+        else:
+            cleaned_text = str(raw_text or '').strip()
+        cleaned_text = html.unescape(cleaned_text)
+        cleaned_text = re.sub(r'</?\w+[^>]*>', '', cleaned_text)
+        cleaned_text = re.sub(r'["\n\r]*', '', cleaned_text)
+    index = -1
+    while -index < len(cleaned_text) and cleaned_text[index] == '.':
+        index -= 1
+    index += 1
+    if index == 0:
+        cleaned_text = cleaned_text + '.'
+    else:
+        cleaned_text = cleaned_text[:index] + '.'
+    if len(cleaned_text) >= 2000:
+        cleaned_text = ''
+    return cleaned_text
+
+
+def write_json_file(dic, file):
+    print('Writing json file: ', file)
+    with open(file, 'w', encoding='utf-8') as fp:
+        json.dump(dic, fp, indent=4)
+
+
+def write_remap_index(unit2index, file):
+    print('Writing remap file: ', file)
+    with open(file, 'w', encoding='utf-8') as fp:
+        for unit in unit2index:
+            fp.write(unit + '\t' + str(unit2index[unit]) + '\n')
 
 # --- Amazon 2014 特定的元数据加载逻辑 ---
 def _flatten_amazon_categories(raw_categories):
@@ -319,7 +362,7 @@ def make_inters_in_order(inters):
 
 def convert_inters2dict(inters):
     """
-    (通用) 将原始交互映射为 user2items, user2index, item2index。
+    (通用) 将原始交互映射为 user2interactions, user2index, item2index。
     """
     all_users = {u for (u, i, r, t) in inters}
     all_items = {i for (u, i, r, t) in inters}
@@ -329,93 +372,16 @@ def convert_inters2dict(inters):
     user2index = {u: idx for idx, u in enumerate(users_sorted)}
     item2index = {i: idx for idx, i in enumerate(items_sorted)}
 
-    user2items = collections.defaultdict(list)
+    user2interactions = collections.defaultdict(list)
     for u, it, r, ts in inters:
         uid = user2index[u]
         iid = item2index[it]
-        user2items[uid].append(iid)
+        user2interactions[uid].append({
+            "item": iid,
+            "timestamp": int(ts),
+        })
 
-    return user2items, user2index, item2index
-
-def generate_data(args, rating_inters):
-    """(通用) 划分训练/验证/测试集"""
-    print('Split dataset: ')
-    print(' Dataset: ', args.dataset)
-    user2items, user2index, item2index = convert_inters2dict(rating_inters)
-    train_inters, valid_inters, test_inters = dict(), dict(), dict()
-    for u_index in range(len(user2index)):
-        inters = user2items[u_index]
-        # 确保用户至少有3次交互 (k-core=5 应该保证了这一点)
-        if len(inters) < 3:
-            continue
-        train_inters[u_index] = [str(i_index) for i_index in inters[:-2]]
-        valid_inters[u_index] = [str(inters[-2])]
-        test_inters[u_index] = [str(inters[-1])]
-        assert len(user2items[u_index]) == len(train_inters[u_index]) + len(valid_inters[u_index]) + len(test_inters[u_index])
-
-    # 过滤掉那些在 K-core 之后但在划分时少于3个交互的用户
-    valid_uids = set(train_inters.keys())
-    user2items = {uid: items for uid, items in user2items.items() if uid in valid_uids}
-
-    print(f"Total users after split (>=3 items): {len(user2items)}")
-    return user2items, train_inters, valid_inters, test_inters, user2index, item2index
-
-def convert_to_atomic_files(args, train_data, valid_data, test_data, max_history_len=50, use_sliding_window=True):
-    """
-    (通用) 保存为 JSONL 文件
-    """
-    print('Convert dataset to JSONL:')
-    print(' Dataset: ', args.dataset)
-
-    uid_list = list(train_data.keys())
-    uid_list.sort(key=lambda t: int(t))
-
-    output_dir = os.path.join(args.output_path, args.dataset)
-    os.makedirs(output_dir, exist_ok=True)
-
-    # --- Train ---
-    train_path = os.path.join(output_dir, f"{args.dataset}.train.jsonl")
-    with open(train_path, 'w') as f:
-        for uid in uid_list:
-            item_seq = train_data[uid]
-            seq_len = len(item_seq)
-            if seq_len < 1: continue # 至少需要1个历史 + 1个目标
-
-            if use_sliding_window:
-                # 滑动窗口：逐步生成 prefix → target
-                for target_idx in range(1, seq_len):
-                    target_item = item_seq[target_idx] # 目标是第 target_idx 个
-                    seq = item_seq[:target_idx] # 历史是 0 到 target_idx-1
-                    seq = seq[-max_history_len:] # 截断
-                    json.dump({"user": str(uid), "history": seq, "target": target_item}, f)
-                    f.write("\n")
-            else:
-                # 只取最后一个
-                if seq_len > 0:
-                    target_item = item_seq[-1]
-                    seq = item_seq[:-1][-max_history_len:]
-                    json.dump({"user": str(uid), "history": seq, "target": target_item}, f)
-                    f.write("\n")
-
-    # --- Valid ---
-    valid_path = os.path.join(output_dir, f"{args.dataset}.valid.jsonl")
-    with open(valid_path, 'w') as f:
-        for uid in uid_list:
-            item_seq = train_data[uid][-max_history_len:]
-            target_item = valid_data[uid][0]
-            json.dump({"user": str(uid), "history": item_seq, "target": target_item}, f)
-            f.write("\n")
-
-    # --- Test ---
-    test_path = os.path.join(output_dir, f"{args.dataset}.test.jsonl")
-    with open(test_path, 'w') as f:
-        for uid in uid_list:
-            item_seq = (train_data[uid] + valid_data[uid])[-max_history_len:]
-            target_item = test_data[uid][0]
-            json.dump({"user": str(uid), "history": item_seq, "target": target_item}, f)
-            f.write("\n")
-
-    print(f"JSONL files saved to {output_dir}")
+    return user2interactions, user2index, item2index
 
 def parse_args():
     """(通用) 统一的参数解析器"""
@@ -451,9 +417,9 @@ if __name__ == '__main__':
     # --- 1. Amazon 数据预处理 ---
     rating_inters, meta_items, review_details = preprocess_amazon(args)
 
-    # --- 2. 执行通用的数据划分 ---
-    # 无论上面走了哪个分支，这里都拿到了 rating_inters 和 meta_items
-    all_inters, train_inters, valid_inters, test_inters, user2index, item2index = generate_data(args, rating_inters)
+    # --- 2. 重映射并保存完整用户交互序列 ---
+    # Train/valid/test splitting belongs to downstream training modules.
+    all_inters, user2index, item2index = convert_inters2dict(rating_inters)
 
     # --- 3. 执行通用的文件保存 ---
     output_dataset_path = os.path.join(args.output_path, args.dataset)
@@ -461,10 +427,6 @@ if __name__ == '__main__':
 
     # 保存 .inter.json
     write_json_file(all_inters, os.path.join(output_dataset_path, f'{args.dataset}.inter.json'))
-
-    # 保存 .train.jsonl, .valid.jsonl, .test.jsonl
-    # (注意：我修改了 convert_to_atomic_files 中的滑动窗口逻辑，使其更符合标准)
-    convert_to_atomic_files(args, train_inters, valid_inters, test_inters)
 
     # 准备并保存 .item.json
     item2feature = collections.defaultdict(dict)

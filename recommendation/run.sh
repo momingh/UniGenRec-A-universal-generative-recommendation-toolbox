@@ -4,4 +4,4 @@ python main.py --model TIGER --dataset Musical_Instruments --quant_method rkmean
 export CUDA_VISIBLE_DEVICES=6
 python main.py --dataset ml-100k --quant_method rqvae  --model TIGER
 export CUDA_VISIBLE_DEVICES=7
-python main.py --model RPG --dataset Beauty --quant_method opq
+python main.py --model TIGER --dataset Beauty --quant_method rqvae_faiss

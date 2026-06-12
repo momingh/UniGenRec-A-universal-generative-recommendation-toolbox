@@ -132,9 +132,8 @@ def load_and_process_config(model_name: str, dataset_name: str, quant_method: st
 
     config['log_path'] = output_root / "training.log"
     config['save_path'] = output_root / "best_model.pth"
-    config['train_json'] = dataset_root / f"{dataset_name}.train.jsonl"
-    config['valid_json'] = dataset_root / f"{dataset_name}.valid.jsonl"
-    config['test_json'] = dataset_root / f"{dataset_name}.test.jsonl"
+    config['dataset_root'] = dataset_root
+    config['inter_json'] = dataset_root / f"{dataset_name}.inter.json"
     _ensure_dir_exists(output_root)
 
     # === 4. 根据载入的量化细节，计算词表参数 ===
@@ -180,6 +179,21 @@ def load_and_process_config(model_name: str, dataset_name: str, quant_method: st
     eos_id = base_vocab + 4  # 保留 EOS
     vocab_size = eos_id + 1  # ID 范圍 0..eos_id
 
+    # === 6.1 (可选) 用户 Token 区间 (对齐 NonameUntitled/tiger) ===
+    # 在词表尾部、特殊 token 之后再划出 user_ids_count 个槽位给 user token。
+    # user id 经哈希取模落入 0..user_ids_count-1，再加 user_token_base 偏移成最终 token id。
+    # 仅当 config 顶层声明了 user_ids_count(且 > 0) 时启用；GPT2/RPG 等不声明则不受影响。
+    user_ids_count = int(config.get('user_ids_count', 0) or 0)
+    if user_ids_count > 0:
+        user_token_base = vocab_size  # 紧接在 eos_id 之后
+        vocab_size = user_token_base + user_ids_count
+        config['user_ids_count'] = user_ids_count
+        config['user_token_base'] = user_token_base
+        logging.info(
+            f"[Config] 启用 user token: user_ids_count={user_ids_count}, "
+            f"user_token_base={user_token_base}, 扩展后 vocab_size={vocab_size}"
+        )
+
     config['token_params'] = {
         'pad_token_id': pad_id,
         'cls_token_id': cls_id,
@@ -188,7 +202,7 @@ def load_and_process_config(model_name: str, dataset_name: str, quant_method: st
         'eos_token_id': eos_id,
         'vocab_size': vocab_size
     }
-    
+
     return config
 
 
