@@ -37,6 +37,9 @@ class Trainer:
         self.optimizer_name = self.train_cfg["optimizer"]
         self.lr = float(self.train_cfg["lr"])
         self.weight_decay = float(self.train_cfg["weight_decay"])
+        self.max_grad_norm = self.train_cfg.get("max_grad_norm", None)
+        if self.max_grad_norm is not None:
+            self.max_grad_norm = float(self.max_grad_norm)
 
         self.model_params = self.model_cfg["model_params"]
         self.has_dup_layer = bool(self.model_params.get("has_dup_layer", False))
@@ -89,6 +92,8 @@ class Trainer:
             optimizer_class = getattr(torch.optim, self.optimizer_name)
             optimizer = optimizer_class(params_to_optimize, lr=self.lr, weight_decay=self.weight_decay)
             self.logger.info(f"优化器: {self.optimizer_name}, LR: {self.lr}, WeightDecay: {self.weight_decay}")
+            if self.max_grad_norm is not None and self.max_grad_norm > 0:
+                self.logger.info(f"梯度裁剪: max_grad_norm={self.max_grad_norm}")
         else:
             self.logger.info("模型没有可训练参数，不创建优化器。")
 
@@ -111,6 +116,8 @@ class Trainer:
                 if optimizer and hasattr(loss_total, 'requires_grad') and loss_total.requires_grad:
                     optimizer.zero_grad()
                     loss_total.backward()
+                    if self.max_grad_norm is not None and self.max_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(params_to_optimize, self.max_grad_norm)
                     optimizer.step()
                 
                 for key, val in loss_dict.items():

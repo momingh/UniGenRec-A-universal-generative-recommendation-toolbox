@@ -16,10 +16,10 @@ def train_one_epoch(model, train_loader, optimizer, device, scheduler=None, max_
         batch = {k: v.to(device) for k, v in batch.items()}
         optimizer.zero_grad()
         outputs = model.forward(batch)
-        if isinstance(outputs, dict):
-            loss = outputs['loss']  # 处理 RPG 這类返回字典的模型
+        if hasattr(outputs, "loss") and outputs.loss is not None:
+            loss = outputs.loss
         else:
-            loss = outputs.loss      # 处理 TIGER 這类返回物件的模型
+            loss = outputs['loss']
         loss.backward()
         if max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)

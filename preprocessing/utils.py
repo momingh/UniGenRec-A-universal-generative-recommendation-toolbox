@@ -10,6 +10,11 @@ from transformers import AutoModel, AutoTokenizer
 import collections
 from typing import Any, Dict
 
+try:
+    from metadata_text import build_metadata_sentence
+except ImportError:
+    from .metadata_text import build_metadata_sentence
+
 
 
 def get_res_batch(model_name, prompt_list, max_tokens, api_info):
@@ -325,59 +330,8 @@ def load_review_interaction_texts(
     return review_texts, index_records
 
 
-def _rpg_list_to_str(value, remove_blank=False) -> str:
-    if isinstance(value, list):
-        ret = ", ".join(map(str, value))
-    else:
-        ret = value
-    if remove_blank:
-        ret = ret.replace(" ", "")
-    return ret
-
-
-def _rpg_clean_text(raw_text) -> str:
-    text = _rpg_list_to_str(raw_text)
-    text = text.replace("true", "True").replace("false", "False")
-    text = html.unescape(text)
-    text = text.strip()
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"[\n\t]", " ", text)
-    text = re.sub(r" +", " ", text)
-    text = re.sub(r"[^\x00-\x7F]", " ", text)
-    return text
-
-
-def _rpg_sent_process(raw) -> str:
-    sentence = ""
-    if isinstance(raw, float):
-        sentence += str(raw)
-        sentence += "."
-    elif isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list):
-        for values in raw:
-            for value in values:
-                sentence += _rpg_clean_text(value)[:-1]
-                sentence += ", "
-        sentence = sentence[:-2]
-        sentence += "."
-    elif isinstance(raw, list):
-        for value in raw:
-            sentence += _rpg_clean_text(value)
-    elif raw is not None:
-        sentence = _rpg_clean_text(raw)
-    return sentence + " "
-
-
 def build_rpg_sentence_text(meta_data: Dict) -> str:
-    features_needed = [
-        "title", "price", "brand",
-        "feature", "categories", "description",
-    ]
-    meta_sentence = ""
-    keys = set(meta_data.keys())
-    for feature in features_needed:
-        if feature in keys:
-            meta_sentence += _rpg_sent_process(meta_data[feature])
-    return meta_sentence
+    return build_metadata_sentence(meta_data)
 
 
 def build_text_map(args: argparse.Namespace, id2item: Dict[str, str], item_meta: Dict[str, Dict]) -> Dict[str, str]:
@@ -387,6 +341,34 @@ def build_text_map(args: argparse.Namespace, id2item: Dict[str, str], item_meta:
          return {}
 
     text_format = getattr(args, "text_format", "unigenrec")
+    if args.dataset_type == "amazon" and text_format == "metadata_sentence":
+        print("将直接使用 item.json 中的 metadata_sentence 字段构建 item 文本。")
+        text_map = {}
+        missing_meta_count = 0
+        missing_sentence_count = 0
+
+        for new_id_str, orig_id in id2item.items():
+            meta_data = item_meta.get(new_id_str)
+            if not meta_data:
+                missing_meta_count += 1
+                continue
+
+            text = meta_data.get("metadata_sentence", "")
+            if not isinstance(text, str) or not text.strip():
+                missing_sentence_count += 1
+                continue
+
+            text_map[orig_id] = text
+
+        if missing_meta_count > 0:
+            print(f"[WARN] {missing_meta_count} 个 item 在 item.json 中缺少元数据。")
+        if missing_sentence_count > 0:
+            raise RuntimeError(
+                f"{missing_sentence_count} 个 item 缺少 metadata_sentence；"
+                "请先重新运行 preprocessing/process_data.py，或显式使用 --text_format rpg_sentence 回退生成。"
+            )
+        return text_map
+
     if args.dataset_type == "amazon" and text_format == "rpg_sentence":
         print("将使用 RPG metadata.sentence 兼容格式构建 item 文本。")
         text_map = {}
@@ -397,7 +379,7 @@ def build_text_map(args: argparse.Namespace, id2item: Dict[str, str], item_meta:
                 missing_meta_count += 1
                 text_map[orig_id] = "N/A"
                 continue
-            text = build_rpg_sentence_text(meta_data)
+            text = meta_data.get("metadata_sentence") or build_rpg_sentence_text(meta_data)
             text_map[orig_id] = text if text.strip() else "N/A"
         if missing_meta_count > 0:
             print(f"[WARN] {missing_meta_count} 个 item 在 item.json 中缺少元数据。")

@@ -56,6 +56,8 @@ class RQVAE_FAISS(nn.Module):
         self.config = config
         self.loss_type = train_params["loss_type"]
         self.quant_loss_weight = train_params["quant_loss_weight"]
+        self.db_scale = self._resolve_db_scale(config, model_params, item_embeddings)
+        logging.info("[RQVAE_FAISS] Setting scaling factor to %s", self.db_scale)
 
         encode_layer_dims = [input_size] + hidden_sizes + [latent_size]
         correction_net = MLPLayers(layers=encode_layer_dims, dropout=dropout, bn=bn)
@@ -76,6 +78,27 @@ class RQVAE_FAISS(nn.Module):
             verbose=faiss_verbose,
         )
         self._report_init_stats(item_embeddings=item_embeddings, codebook_sizes=codebook_sizes)
+
+    @staticmethod
+    def _resolve_db_scale(config, model_params, item_embeddings):
+        scale = model_params.get(
+            "db_scale",
+            config.get("data_limits", {}).get("db_scale", -1),
+        )
+        try:
+            scale = float(scale)
+        except (TypeError, ValueError):
+            scale = -1
+
+        if scale <= 0:
+            scale = float(as_float32_numpy(item_embeddings).max())
+
+        if scale == 0:
+            raise ValueError("RQVAE_FAISS db_scale resolved to 0.")
+        return scale
+
+    def _normalize_input(self, x):
+        return x / self.db_scale
 
     @staticmethod
     def _zero_init_last_linear(module):
@@ -102,6 +125,7 @@ class RQVAE_FAISS(nn.Module):
             codebook_sizes=codebook_sizes,
             verbose=verbose,
         )
+        codebooks = [codebook / self.db_scale for codebook in codebooks]
 
         embeddings = [quantizer.embedding for quantizer in self.rq.vq_layers]
         copy_codebooks_to_embeddings(codebooks, embeddings, label="RQ-VAE")
@@ -122,7 +146,7 @@ class RQVAE_FAISS(nn.Module):
             all_indices = []
             for start in range(0, num_items, batch_size):
                 batch = data[start:start + batch_size]
-                # 编码器最后一层零初始化, 此时 encoder(x) == x
+                # 编码器最后一层零初始化, 此时 encoder(x / db_scale) == x / db_scale
                 indices = self.get_codes(x=batch, use_sk=False)
                 all_indices.append(indices.cpu())
             all_indices = torch.cat(all_indices, dim=0)  # [num_items, num_levels]
@@ -163,6 +187,7 @@ class RQVAE_FAISS(nn.Module):
         if x is None:
             raise ValueError("RQVAE_FAISS.forward requires x or xs.")
 
+        x = self._normalize_input(x)
         x = self.encoder(x)
         x_q, rq_loss, indices = self.rq(x, use_sk=use_sk)
         out = self.decoder(x_q)
@@ -176,17 +201,19 @@ class RQVAE_FAISS(nn.Module):
         if x is None:
             raise ValueError("RQVAE_FAISS.get_codes requires x or xs.")
 
+        x = self._normalize_input(x)
         x_e = self.encoder(x)
         _, _, indices = self.rq(x_e, use_sk=use_sk)
         return indices
 
     def compute_loss(self, outputs, batch_data):
         out, quant_loss, _ = outputs
+        target = self._normalize_input(batch_data)
 
         if self.loss_type == "mse":
-            loss_recon = F.mse_loss(out, batch_data, reduction="mean")
+            loss_recon = F.mse_loss(out, target, reduction="mean")
         elif self.loss_type == "l1":
-            loss_recon = F.l1_loss(out, batch_data, reduction="mean")
+            loss_recon = F.l1_loss(out, target, reduction="mean")
         else:
             raise ValueError("incompatible loss type")
 

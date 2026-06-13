@@ -76,6 +76,8 @@ review_api
 
 如果 `--pca_dim > 0` 且原始维度大于目标维度，会额外保存 `-pca<pca_dim>.npy` 文件。原始 `.npy` 也会保留。
 
+Amazon item 文本 embedding 默认读取 `<dataset>.item.json` 中的 `metadata_sentence` 字段；如果缺少该字段，请先重新运行 `process_data.py`。
+
 ### 3.1 本地 item 文本 embedding
 
 默认本地模型路径是 `preprocessing/emb_llm/Qwen3-Embedding-8B`。如未下载，可先运行：
