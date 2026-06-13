@@ -15,7 +15,6 @@ class Trainer:
     """
 
     FULL_TRAIN_VAL_SPLIT = 0.05
-    BEST_LOSS_EPS = 1e-6
     PROGRESS_NCOLS = 120
 
     def __init__(self, config: dict, model: torch.nn.Module, device: torch.device):
@@ -97,9 +96,8 @@ class Trainer:
         else:
             self.logger.info("模型没有可训练参数，不创建优化器。")
 
-        best_loss, best_epoch = float("inf"), 0
-        best_path = os.path.join(ckpt_dir, f"{self.model_name}_best.pth")
-        os.makedirs(os.path.dirname(best_path), exist_ok=True)
+        final_path = os.path.join(ckpt_dir, f"{self.model_name}_final.pth")
+        os.makedirs(os.path.dirname(final_path), exist_ok=True)
 
         pbar = tqdm(range(self.epochs), desc=f"Training {self.model_name}", ncols=self.PROGRESS_NCOLS)
         for epoch in pbar:
@@ -150,27 +148,20 @@ class Trainer:
                  if 'loss_latent' in avg_losses: postfix_str += f"|Lat={avg_losses['loss_latent']:.4f}"
             pbar.set_postfix_str(postfix_str)
 
-            current_eval_loss = avg_val_loss if val_loader else avg_losses['loss_total']
-            if current_eval_loss < best_loss - self.BEST_LOSS_EPS:
-                best_loss = current_eval_loss
-                best_epoch = epoch + 1
-                if optimizer:
-                    torch.save(self.model.state_dict(), best_path)
-
-
         pbar.close()
         self.logger.info("=" * 100)
         self.logger.info(f"🏁 迭代式训练完成 [{self.model_name}]")
+        final_train_loss = avg_losses['loss_total']
+        self.logger.info(f"📉 Final Epoch 训练集 Loss: {final_train_loss:.6f}")
         if val_loader:
-            self.logger.info(f"📉 最佳验证集 Loss: {best_loss:.6f} (在 Epoch {best_epoch})")
-        else:
-             final_train_loss = avg_losses['loss_total']
-             self.logger.info(f"📉 最终训练集 Loss: {final_train_loss:.6f}")
-             
-        if optimizer: self.logger.info(f"💾 最佳模型已保存至: {best_path}")
+            self.logger.info(f"📉 Final Epoch 验证集 Loss: {avg_val_loss:.6f}")
+
+        if optimizer:
+            torch.save(self.model.state_dict(), final_path)
+            self.logger.info(f"💾 Final Epoch 模型已保存至: {final_path}")
         self.logger.info("=" * 100)
 
-        return best_path if os.path.exists(best_path) else None
+        return final_path if os.path.exists(final_path) else None
 
     def _fit_one_shot(self, embeddings_data, ckpt_dir: str) -> str:
         """处理一次性拟合的模型 (接收 numpy 数据)。"""

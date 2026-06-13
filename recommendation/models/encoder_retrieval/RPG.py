@@ -22,8 +22,6 @@ class ResBlock(nn.Module):
         super().__init__()
         self.linear = nn.Linear(hidden_size, hidden_size)
         torch.nn.init.zeros_(self.linear.weight)
-        # if self.linear.bias is not None:
-        #     torch.nn.init.zeros_(self.linear.bias)
         self.act = nn.SiLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -128,8 +126,8 @@ class RPG(AbstractModel):
     ) -> torch.Tensor:
         input_tokens = self.item_id2tokens[batch["input_ids"]]
         token_emb = self.gpt2.wte(input_tokens)
-        # input_embs = self.norm(token_emb).mean(dim=-2)
-        input_embs = token_emb.mean(dim=-2)
+        input_embs = self.norm(token_emb).mean(dim=-2)
+        # input_embs = token_emb.mean(dim=-2)
         outputs = self.gpt2(inputs_embeds=input_embs, attention_mask=batch["attention_mask"])
         hs = outputs.last_hidden_state
         final_states = [self.pred_heads[i](hs).unsqueeze(-2) for i in range(self.n_pred_head)]

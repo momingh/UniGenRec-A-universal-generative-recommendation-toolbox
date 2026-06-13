@@ -16,19 +16,19 @@ rqvae_faiss:
     # embedding 缩放因子；-1 表示使用 item_embeddings 的最大值自动估计。
     db_scale: -1
     # 残差量化层数；最终每个 item 会得到 num_levels 个离散 code。
-    num_levels: 16
+    num_levels: 3
     # 去重层使用的词表大小，也是 Trainer 的兼容字段；如果 has_dup_layer=true，会用它生成追加的去重 ID。
-    codebook_size: 128
+    codebook_size: 256
     # 每一层 RQ codebook 的大小；长度必须等于 num_levels，每个值必须是 2 的幂。
-    codebook_sizes: [128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128]
+    codebook_sizes: [256, 256, 256]
     # 是否在预测码本时追加一层去重 ID；用于区分基础 code 完全相同的 item。
-    has_dup_layer: false
+    has_dup_layer: true
     # MLP 中 Linear 层前的 dropout 概率；越大正则越强，但可能欠拟合。
     dropout: 0.1
     # 是否在隐藏层使用 BatchNorm1d；小 batch 或分布变化大时可能不稳定。
     bn: false
     # 每个量化层使用 Sinkhorn 分配时的 epsilon；长度必须等于 num_levels，0 表示退化为 argmin 最近邻。
-    sk_epsilons: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    sk_epsilons: [0.0, 0.0, 0.0]
     # Sinkhorn 分配的迭代次数，仅当对应层 sk_epsilon > 0 时实际影响分配。
     sk_iters: 100
     # 初始化时直接使用原始 item_embeddings 训练 FAISS ResidualQuantizer，不经过 encoder。

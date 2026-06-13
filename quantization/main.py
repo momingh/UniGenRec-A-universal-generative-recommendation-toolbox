@@ -5,7 +5,6 @@ import os
 import numpy as np
 import torch
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 
 import utils
 from trainer import Trainer
@@ -84,13 +83,9 @@ def main():
                 f"对 item_embeddings 执行 PCA 降维: {item_embeddings.shape} -> "
                 f"({item_embeddings.shape[0]}, {pca_dim})"
             )
-            logging.info("标准化数据 (StandardScaler)...")
-            scaler = StandardScaler()
-            scaled_embeddings = scaler.fit_transform(item_embeddings)
-
-            logging.info(f"执行 PCA (n_components={pca_dim})...")
-            pca = PCA(n_components=pca_dim, svd_solver="auto", random_state=42)
-            item_embeddings = pca.fit_transform(scaled_embeddings).astype(np.float32)
+            logging.info(f"执行 PCA (n_components={pca_dim}, whiten=True)...")
+            pca = PCA(n_components=pca_dim, whiten=True, random_state=42)
+            item_embeddings = pca.fit_transform(item_embeddings).astype(np.float32)
             kept_variance = float(np.sum(pca.explained_variance_ratio_))
             logging.info(f"PCA 完成，保留方差比例: {kept_variance:.6f}")
 
@@ -107,18 +102,19 @@ def main():
     model = ModelClass(config=config, input_size=input_size, item_embeddings=item_embeddings).to(device)
 
     trainer = Trainer(config=config, model=model, device=device)
-    best_model_path = trainer.fit(
+    model_path = trainer.fit(
         embeddings_data=item_embeddings,
         ckpt_dir=ckpt_dir
     )
 
-    if best_model_path and os.path.exists(best_model_path):
-        if best_model_path.endswith((".pth", ".pt")):
-            model.load_state_dict(torch.load(best_model_path, map_location=device))
+    if model_path and os.path.exists(model_path):
+        if model_path.endswith((".pth", ".pt")):
+            model.load_state_dict(torch.load(model_path, map_location=device))
+            logging.info(f"已加载训练结束模型 checkpoint: {model_path}")
         else:
-            logging.info(f"One-shot 拟合信号已生成: {best_model_path}。跳过 PyTorch checkpoint 加载。")
+            logging.info(f"One-shot 拟合信号已生成: {model_path}。跳过 PyTorch checkpoint 加载。")
     else:
-        logging.warning(f"未找到或无效的最佳模型路径: {best_model_path}。使用训练结束时的模型。")
+        logging.warning(f"未找到或无效的模型路径: {model_path}。使用当前内存中的模型。")
 
     final_codebook_path = utils.build_codebook_path(
         codebook_base_path=args.codebook_base_path,
