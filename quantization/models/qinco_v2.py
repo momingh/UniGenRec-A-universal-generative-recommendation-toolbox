@@ -12,15 +12,15 @@ from .common.model_utils import (
 )
 
 
-class QINCoStep(nn.Module):
-    """Single neural residual quantization step used by QINCo."""
+class QINCoV2Step(nn.Module):
+    """Single neural residual quantization step used by QINCo V2."""
 
     def __init__(self, d, K, L, h):
         super().__init__()
 
         self.d, self.K, self.L, self.h = d, K, L, h
         self.codebook = nn.Embedding(K, d)
-        self.MLPconcat = nn.Linear(2 * d, d)
+        self.MLPconcat = nn.Linear(d, d)
 
         self.residual_blocks = nn.ModuleList(
             nn.Sequential(
@@ -33,8 +33,7 @@ class QINCoStep(nn.Module):
 
     def decode(self, xhat, codes):
         zqs = self.codebook(codes)
-        concat = torch.cat((zqs, xhat), dim=1)
-        zqs = zqs + self.MLPconcat(concat)
+        zqs = zqs + self.MLPconcat(zqs + xhat)
 
         for residual_block in self.residual_blocks:
             zqs = zqs + residual_block(zqs)
@@ -42,11 +41,6 @@ class QINCoStep(nn.Module):
         return zqs
 
     def encode(self, xhat, x):
-        """
-        参数：
-            xhat (torch.Tensor): 当前重构向量 (batch_size, d)
-            x (torch.Tensor): 目标向量 (batch_size, d)
-        """
         zqs = self.codebook.weight
         K, d = zqs.shape
         batch_size = xhat.shape[0]
@@ -58,8 +52,7 @@ class QINCoStep(nn.Module):
             .reshape(batch_size * K, d)
         )
 
-        concat = torch.cat((zqs_r, xhat_r), dim=1)
-        zqs_r = zqs_r + self.MLPconcat(concat)
+        zqs_r = zqs_r + self.MLPconcat(zqs_r + xhat_r)
 
         for residual_block in self.residual_blocks:
             zqs_r = zqs_r + residual_block(zqs_r)
@@ -70,19 +63,19 @@ class QINCoStep(nn.Module):
         return codes, xhat_next - xhat
 
 
-class QINCO(nn.Module):
+class QINCO_V2(nn.Module):
     """
-    QINCo neural residual vector quantizer.
+    QINCo V2 neural residual vector quantizer.
 
-    The first level uses a standard learnable codebook. Later levels use
-    QINCoStep modules that condition each residual code contribution on the
-    current reconstruction.
+    This keeps QINCo's residual-code conditioning path, while registering as a
+    separate quantization method (`qinco_v2`) so experiments can run without
+    overwriting existing QINCo checkpoints or codebooks.
     """
 
     def __init__(self, config: dict, input_size: int, item_embeddings=None):
         super().__init__()
 
-        model_cfg = config["qinco"]
+        model_cfg = config["qinco_v2"]
         model_params = model_cfg["model_params"]
 
         d = int(input_size)
@@ -98,29 +91,29 @@ class QINCO(nn.Module):
         faiss_verbose = bool(model_params.get("faiss_verbose", True))
 
         if M <= 0:
-            raise ValueError("QINCo num_levels must be positive.")
+            raise ValueError("QINCO_V2 num_levels must be positive.")
         if K <= 0:
-            raise ValueError("QINCo codebook_size must be positive.")
+            raise ValueError("QINCO_V2 codebook_size must be positive.")
         if L < 0:
-            raise ValueError("QINCo num_residual_blocks cannot be negative.")
+            raise ValueError("QINCO_V2 num_residual_blocks cannot be negative.")
         if h <= 0:
-            raise ValueError("QINCo hidden_size must be positive.")
+            raise ValueError("QINCO_V2 hidden_size must be positive.")
         if len(codebook_sizes) != M:
-            raise ValueError("QINCo codebook_sizes must have the same length as num_levels.")
+            raise ValueError("QINCO_V2 codebook_sizes must have the same length as num_levels.")
         if any(size != K for size in codebook_sizes):
-            raise ValueError("QINCo currently requires every codebook_sizes entry to equal codebook_size.")
+            raise ValueError("QINCO_V2 currently requires every codebook_sizes entry to equal codebook_size.")
         if faiss_init and item_embeddings is None:
-            raise ValueError("QINCo requires item_embeddings for FAISS initialization.")
+            raise ValueError("QINCO_V2 requires item_embeddings for FAISS initialization.")
 
         self.config = config
         self.d, self.K, self.L, self.M, self.h = d, K, L, M, h
         self.loss_weights = model_params.get("loss_weights")
         self.db_scale = self._resolve_db_scale(config, model_params, item_embeddings)
-        logging.info("[QINCo] Setting scaling factor to %s", self.db_scale)
+        logging.info("[QINCo_V2] Setting scaling factor to %s", self.db_scale)
 
         self.codebook0 = nn.Embedding(K, d)
         self.steps = nn.ModuleList(
-            QINCoStep(d, K, L, h)
+            QINCoV2Step(d, K, L, h)
             for _ in range(1, M)
         )
 
@@ -144,11 +137,11 @@ class QINCO(nn.Module):
 
         if scale <= 0:
             if item_embeddings is None:
-                raise ValueError("QINCo db_scale <= 0 requires item_embeddings.")
+                raise ValueError("QINCO_V2 db_scale <= 0 requires item_embeddings.")
             scale = float(as_float32_numpy(item_embeddings).max())
 
         if scale == 0:
-            raise ValueError("QINCo db_scale resolved to 0.")
+            raise ValueError("QINCO_V2 db_scale resolved to 0.")
         return scale
 
     def _normalize_input(self, x):
@@ -164,7 +157,7 @@ class QINCO(nn.Module):
         codebooks = [codebook / self.db_scale for codebook in codebooks]
 
         qinco_codebooks = [self.codebook0] + [step.codebook for step in self.steps]
-        copy_codebooks_to_embeddings(codebooks, qinco_codebooks, label="QINCo")
+        copy_codebooks_to_embeddings(codebooks, qinco_codebooks, label="QINCo_V2")
 
     def decode(self, codes):
         xhat = self.codebook0(codes[:, 0])
@@ -214,21 +207,21 @@ class QINCO(nn.Module):
 
     def compute_loss(self, outputs=None, *args, batch_data=None, xs=None, **kwargs):
         if outputs is None:
-            raise ValueError("QINCo.compute_loss requires forward outputs.")
+            raise ValueError("QINCO_V2.compute_loss requires forward outputs.")
         if not isinstance(outputs, (tuple, list)) or len(outputs) < 3:
-            raise ValueError("QINCo outputs must contain codes, xhat, and losses.")
+            raise ValueError("QINCO_V2 outputs must contain codes, xhat, and losses.")
 
         _, xhat, losses = outputs[:3]
         target = xs if xs is not None else batch_data
         if target is None:
-            raise ValueError("QINCo.compute_loss requires batch_data or xs.")
+            raise ValueError("QINCO_V2.compute_loss requires batch_data or xs.")
         target = self._normalize_input(target)
 
         normalizer = max(int(target.numel()), 1)
         if self.loss_weights is not None:
             weights = torch.as_tensor(self.loss_weights, dtype=losses.dtype, device=losses.device)
             if weights.numel() != losses.numel():
-                raise ValueError("QINCo loss_weights must have length num_levels.")
+                raise ValueError("QINCO_V2 loss_weights must have length num_levels.")
             loss_total = (losses * weights).sum() / normalizer
         else:
             loss_total = losses.sum() / normalizer
@@ -238,6 +231,3 @@ class QINCO(nn.Module):
             "loss_total": loss_total,
             "loss_recon": loss_recon,
         }
-
-
-QINCo = QINCO

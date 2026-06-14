@@ -54,3 +54,7 @@ rqvae_faiss:
     max_grad_norm: 1.0
     # torch.optim 中的优化器类名；Trainer 会用 getattr(torch.optim, optimizer) 创建。
     optimizer: "AdamW"
+    # 每隔多少 epoch 评估码本利用率、码本熵和 prefix 内 embedding 余弦相似度；<=0 表示关闭。
+    eval_metrics_interval: 100
+    # 每个 prefix group 最多采样多少 item 计算余弦相似度；用于限制大簇评估开销。
+    prefix_cosine_max_items: 1000

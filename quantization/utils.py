@@ -203,59 +203,197 @@ def calculate_codebook_metrics(codes_np: np.ndarray, model_params: dict):
 
 def log_codebook_metrics(metrics: dict, prefix: str = "码本指标"):
     sid = metrics["sid"]
-    logging.info(
-        "%s: items=%d, layers=%d, unique_sid=%d, duplicate_count=%d, duplicate_rate=%.6f",
-        prefix,
-        metrics["num_items"],
-        metrics["num_layers"],
-        sid["unique_count"],
-        sid["duplicate_count"],
-        sid["duplicate_rate"],
+    summary_message = (
+        f"{prefix}: items={metrics['num_items']}, layers={metrics['num_layers']}, "
+        f"unique_sid={sid['unique_count']}, duplicate_count={sid['duplicate_count']}, "
+        f"duplicate_rate={sid['duplicate_rate']:.6f}"
     )
-    for layer in metrics["layers"]:
-        logging.info(
-            "%s L%d: used=%d/%d, utilization=%.6f, entropy=%.6f, normalized_entropy=%.6f",
-            prefix,
-            layer["layer"],
-            layer["used_tokens"],
-            layer["codebook_size"],
-            layer["utilization"],
-            layer["entropy"],
-            layer["normalized_entropy"],
+    if "mean_prefix_cosine" in metrics.get("averages", {}):
+        summary_message += (
+            f", avg_mean_cos={_format_optional_float(metrics['averages']['mean_prefix_cosine'])}"
         )
+    logging.info(summary_message)
+
+    for layer in metrics["layers"]:
+        layer_message = (
+            f"{prefix} L{layer['layer']}: "
+            f"used={layer['used_tokens']}/{layer['codebook_size']}, "
+            f"utilization={layer['utilization']:.6f}, "
+            f"entropy={layer['entropy']:.6f}, "
+            f"normalized_entropy={layer['normalized_entropy']:.6f}"
+        )
+        if "mean_prefix_cosine" in layer:
+            layer_message += (
+                f", groups={layer['prefix_groups']}, "
+                f"multi_groups={layer['prefix_multi_groups']}, "
+                f"max_group={layer['prefix_max_group_size']}, "
+                f"mean_cos={_format_optional_float(layer['mean_prefix_cosine'])}"
+            )
+        logging.info(layer_message)
+
+
+def calculate_prefix_cosine_metrics(
+    codes_np: np.ndarray,
+    embeddings_np: np.ndarray,
+    max_items_per_group: int = 1000,
+    random_seed: int = 42,
+):
+    """
+    Calculate cosine similarity among item embeddings sharing the same prefix code.
+
+    For layer L, the prefix is codes[:, :L+1]. The reported cosine is averaged
+    over prefix groups with at least two items. Large groups are sampled to keep
+    periodic training evaluation bounded.
+    """
+    codes_np = np.asarray(codes_np)
+    embeddings_np = np.asarray(embeddings_np)
+
+    if codes_np.ndim != 2:
+        raise ValueError(f"codes 必须是二维数组，实际 shape={codes_np.shape}。")
+    if embeddings_np.ndim < 2:
+        raise ValueError(f"embeddings 必须至少是二维数组，实际 shape={embeddings_np.shape}。")
+    if embeddings_np.shape[0] != codes_np.shape[0]:
+        raise ValueError(
+            f"codes 行数 ({codes_np.shape[0]}) 与 embeddings 行数 ({embeddings_np.shape[0]}) 不一致。"
+        )
+
+    num_items, num_layers = codes_np.shape
+    embeddings_np = embeddings_np.reshape(num_items, -1).astype(np.float64, copy=False)
+    norms = np.linalg.norm(embeddings_np, axis=1, keepdims=True)
+    normalized_embeddings = embeddings_np / np.maximum(norms, 1e-12)
+
+    rng = np.random.default_rng(random_seed)
+    layer_metrics = []
+    max_items_per_group = int(max_items_per_group) if max_items_per_group else 0
+
+    for layer_idx in range(num_layers):
+        prefix_codes = codes_np[:, :layer_idx + 1].astype(np.int64, copy=False)
+        _, inverse = np.unique(prefix_codes, axis=0, return_inverse=True)
+
+        order = np.argsort(inverse, kind="stable")
+        sorted_inverse = inverse[order]
+        group_starts = np.r_[0, np.flatnonzero(np.diff(sorted_inverse)) + 1]
+        group_ends = np.r_[group_starts[1:], len(order)]
+
+        group_sizes = group_ends - group_starts
+        num_groups = int(len(group_sizes))
+        multi_group_mask = group_sizes > 1
+        multi_item_groups = int(np.count_nonzero(multi_group_mask))
+        singleton_groups = int(num_groups - multi_item_groups)
+        total_items_in_multi_groups = int(group_sizes[multi_group_mask].sum())
+        max_group_size = int(group_sizes.max()) if num_groups > 0 else 0
+
+        group_means = []
+        sampled_groups = 0
+
+        for start, end in zip(group_starts[multi_group_mask], group_ends[multi_group_mask]):
+            item_indices = order[start:end]
+            group_size = int(item_indices.shape[0])
+            if max_items_per_group > 1 and group_size > max_items_per_group:
+                item_indices = rng.choice(item_indices, size=max_items_per_group, replace=False)
+                sampled_groups += 1
+
+            group_embeddings = normalized_embeddings[item_indices]
+            sampled_size = int(group_embeddings.shape[0])
+            if sampled_size < 2:
+                continue
+
+            summed = group_embeddings.sum(axis=0)
+            diagonal_sum = float(np.einsum("ij,ij->i", group_embeddings, group_embeddings).sum())
+            pair_sum_twice = float(np.dot(summed, summed) - diagonal_sum)
+            mean_cosine = pair_sum_twice / float(sampled_size * (sampled_size - 1))
+
+            group_means.append(mean_cosine)
+
+        mean_prefix_cosine = None
+        if group_means:
+            group_means = np.asarray(group_means, dtype=np.float64)
+            mean_prefix_cosine = float(group_means.mean())
+
+        layer_metrics.append({
+            "layer": int(layer_idx),
+            "prefix_length": int(layer_idx + 1),
+            "num_groups": num_groups,
+            "singleton_groups": singleton_groups,
+            "multi_item_groups": multi_item_groups,
+            "avg_group_size": float(num_items / num_groups) if num_groups > 0 else 0.0,
+            "avg_multi_item_group_size": (
+                float(total_items_in_multi_groups / multi_item_groups)
+                if multi_item_groups > 0 else 0.0
+            ),
+            "max_group_size": max_group_size,
+            "sampled_groups": int(sampled_groups),
+            "mean_prefix_cosine": mean_prefix_cosine,
+        })
+
+    valid_means = [
+        layer["mean_prefix_cosine"]
+        for layer in layer_metrics
+        if layer["mean_prefix_cosine"] is not None
+    ]
+
+    return {
+        "num_items": int(num_items),
+        "num_layers": int(num_layers),
+        "max_items_per_group": int(max_items_per_group),
+        "layers": layer_metrics,
+        "averages": {
+            "mean_prefix_cosine": float(np.mean(valid_means)) if valid_means else None,
+        },
+    }
+
+
+def merge_prefix_cosine_into_codebook_metrics(codebook_metrics: dict, prefix_cosine_metrics: dict):
+    if codebook_metrics["num_layers"] != prefix_cosine_metrics["num_layers"]:
+        raise ValueError(
+            "codebook 指标层数与 prefix cosine 指标层数不一致，"
+            f"{codebook_metrics['num_layers']} != {prefix_cosine_metrics['num_layers']}。"
+        )
+
+    codebook_metrics["averages"]["mean_prefix_cosine"] = (
+        prefix_cosine_metrics["averages"]["mean_prefix_cosine"]
+    )
+    codebook_metrics["prefix_cosine_max_items_per_group"] = (
+        prefix_cosine_metrics["max_items_per_group"]
+    )
+
+    for codebook_layer, prefix_layer in zip(
+        codebook_metrics["layers"],
+        prefix_cosine_metrics["layers"],
+    ):
+        if codebook_layer["layer"] != prefix_layer["layer"]:
+            raise ValueError(
+                "codebook 指标层号与 prefix cosine 指标层号不一致，"
+                f"{codebook_layer['layer']} != {prefix_layer['layer']}。"
+            )
+        codebook_layer["prefix_groups"] = prefix_layer["num_groups"]
+        codebook_layer["prefix_multi_groups"] = prefix_layer["multi_item_groups"]
+        codebook_layer["prefix_max_group_size"] = prefix_layer["max_group_size"]
+        codebook_layer["mean_prefix_cosine"] = prefix_layer["mean_prefix_cosine"]
+
+    return codebook_metrics
+
+
+def _format_optional_float(value):
+    return "NA" if value is None else f"{value:.6f}"
+
 
 def calc_cos_sim(model, data, config):
     if len(data.shape) > 2:
         data = data[:, 0, :]
     ids = model.get_codes(data).cpu().numpy()
     max_item_calculate = 1000
-    cos_sim_array = np.zeros(config["num_levels"])
-
-    for n_prefix in range(1, config["num_levels"] + 1):
-        unique_prefix = np.unique(ids[:, :n_prefix], axis=0)
-        this_level_cos_sim_within_cluster = []
-
-        for this_level_prefix in unique_prefix:
-            mask = (ids[:, :n_prefix] == this_level_prefix).all(axis=1)
-            this_cluster = data[mask].cpu()
-            this_cluster_num = this_cluster.shape[0]
-
-            if this_cluster_num > 1:
-                indice = torch.randperm(this_cluster_num)[:max_item_calculate]
-                cos_sim = F.cosine_similarity(
-                    this_cluster[indice, :, None],
-                    this_cluster.t()[None, :, indice]
-                )
-                cos_sim_sum = torch.tril(cos_sim, diagonal=-1).sum()
-                normalization_factor = (this_cluster_num - 1) * this_cluster_num / 2
-                this_level_cos_sim_within_cluster.append(
-                    cos_sim_sum.item() / normalization_factor
-                )
-
-        if this_level_cos_sim_within_cluster:
-            cos_sim_array[n_prefix - 1] = np.mean(this_level_cos_sim_within_cluster)
-
-    return cos_sim_array
+    data_np = data.detach().cpu().numpy() if isinstance(data, torch.Tensor) else np.asarray(data)
+    metrics = calculate_prefix_cosine_metrics(
+        ids,
+        data_np,
+        max_items_per_group=max_item_calculate,
+        random_seed=42,
+    )
+    return np.array([
+        layer["mean_prefix_cosine"] if layer["mean_prefix_cosine"] is not None else 0.0
+        for layer in metrics["layers"][:config["num_levels"]]
+    ])
 
 
 def process_embeddings(config, device, id2meta_file=None, embedding_save_path=None):

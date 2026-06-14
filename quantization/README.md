@@ -43,6 +43,23 @@ python main.py \
 configs/rqvae_faiss_config.yaml
 ```
 
+## 训练 QINCo V2
+
+`qinco_v2` 是独立于 `qinco` 的量化方法，会生成单独的 checkpoint、日志目录和 codebook 文件。
+
+```bash
+python main.py \
+  --model_name qinco_v2 \
+  --dataset_name <DATASET> \
+  --embedding_model <EMBEDDING_MODEL>
+```
+
+对应配置文件：
+
+```text
+configs/qinco_v2_config.yaml
+```
+
 ## 输入文件要求
 
 默认会读取：

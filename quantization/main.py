@@ -20,7 +20,7 @@ def main():
         '--model_name',
         type=str,
         required=True,
-        choices=['rqvae', 'rqvae_faiss', 'opq', 'qinco', 'rqkmeans', 'rqkmeans_plus'],
+        choices=['rqvae', 'rqvae_faiss', 'opq', 'qinco', 'qinco_v2', 'rqkmeans', 'rqkmeans_plus'],
         help='要使用的量化器模型名称。'
     )
     parser.add_argument('--dataset_name', type=str, required=True, help='数据集名称 (e.g., Baby)')
@@ -43,6 +43,19 @@ def main():
     parser.add_argument('--ckpt_base_path', type=str, default=os.path.abspath(os.path.join(BASE_DIR, '../ckpt/quantization')), help='模型根目录')
     parser.add_argument('--codebook_base_path', type=str, default=os.path.abspath(os.path.join(BASE_DIR, '../datasets')), help='码本根目录')
     parser.add_argument('--pca_dim', type=int, default=None, help='可选 PCA 降维目标维度；<=0 表示不降维；未传时读取配置文件。')
+    parser.add_argument(
+        '--checkpoint_selection',
+        type=str,
+        default=None,
+        choices=['final', 'best_val'],
+        help='生成 code 时使用的 checkpoint：final=最后一次训练模型，best_val=验证集 MSE 最优模型。未传时读取配置文件。'
+    )
+    parser.add_argument(
+        '--early_stop_patience',
+        type=int,
+        default=None,
+        help='checkpoint_selection=best_val 时，验证集 MSE 连续多少个 epoch 未提升后早停。未传时读取配置文件。'
+    )
 
     args = parser.parse_args()
 
@@ -61,6 +74,10 @@ def main():
 
     model_cfg = config.get(args.model_name.lower(), {})
     train_cfg = model_cfg.get("training_params", {})
+    if args.checkpoint_selection is not None:
+        train_cfg["checkpoint_selection"] = args.checkpoint_selection
+    if args.early_stop_patience is not None:
+        train_cfg["early_stop_patience"] = args.early_stop_patience
     pca_dim = args.pca_dim
     if pca_dim is None:
         pca_dim = train_cfg.get("pca_dim", 0)
@@ -110,7 +127,7 @@ def main():
     if model_path and os.path.exists(model_path):
         if model_path.endswith((".pth", ".pt")):
             model.load_state_dict(torch.load(model_path, map_location=device))
-            logging.info(f"已加载训练结束模型 checkpoint: {model_path}")
+            logging.info(f"已加载用于生成 code 的 checkpoint: {model_path}")
         else:
             logging.info(f"One-shot 拟合信号已生成: {model_path}。跳过 PyTorch checkpoint 加载。")
     else:
