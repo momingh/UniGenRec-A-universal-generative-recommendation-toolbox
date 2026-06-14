@@ -6,9 +6,9 @@ common:
   num_workers: 4
   predict_batch_size: 256
 
-qinco:
+qinco_aux:
   model_params:
-    # QINCo 量化层数 M；最终每个 item 会得到 num_levels 个 code。
+    # QINCo auxiliary-loss 量化层数 M；最终每个 item 会得到 num_levels 个 code。
     num_levels: 16
     # 每层码本大小 K；每个 code 的取值范围是 0 到 codebook_size-1。
     codebook_size: 128
@@ -16,21 +16,25 @@ qinco:
     codebook_sizes: [128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128]
     # embedding 缩放因子；-1 表示使用 item_embeddings 的最大值自动估计。
     db_scale: -1
-    # 每个 QINCoStep 内部残差 MLP block 数量 L。
-    num_residual_blocks: 4
-    # QINCoStep 残差块隐藏层维度 h。
+    # 每个 QINCoAuxStep 内部残差 MLP block 数量 L。
+    num_residual_blocks: 3
+    # QINCoAuxStep 残差块隐藏层维度 h。
     hidden_size: 256
     # 是否在预测码本时追加去重层。
-    has_dup_layer: true
+    has_dup_layer: false
     # 是否像 rqvae_faiss 一样用 FAISS ResidualQuantizer 初始化码本。
     faiss_init: true
     # 是否打印 FAISS ResidualQuantizer 训练信息。
     faiss_verbose: true
+    # 码本多样性损失权重。
+    diversity_loss_weight: 0.01
+    # 码本利用率损失权重；该项使用负熵，最小化时鼓励更均匀的码字使用。
+    utilization_loss_weight: 0.01
     # 可选：每一层重构损失权重；如启用，长度必须等于 num_levels。
     # loss_weights: [1.0, 1.0, 1.0, 1.0]
 
   training_params:
-    batch_size: 512
+    batch_size: 1024
     epochs: 3000
     lr: 0.0001
     weight_decay: 0.0000
@@ -40,7 +44,6 @@ qinco:
     #   best_val: 使用验证集 MSE 最优模型，并启用 early_stop_patience。
     checkpoint_selection: "best_val"
     # checkpoint_selection=best_val 时，验证集 MSE 连续多少个 epoch 未提升后早停；<=0 表示不早停。
-    # final
     early_stop_patience: 30
     # best_val 的验证指标；mse 对应模型 compute_loss 返回的 loss_recon。
     validation_metric: "mse"

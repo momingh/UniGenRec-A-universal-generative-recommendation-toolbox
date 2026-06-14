@@ -12,7 +12,7 @@ from pathlib import Path
 import importlib
 from collections.abc import Mapping
 
-VALID_QUANT_METHODS = {"rqvae", "rqvae_faiss", "opq", "qinco", "qinco_v2", "rqkmeans", "rqkmeans_plus"}
+VALID_QUANT_METHODS = {"rqvae", "rqvae_faiss", "opq", "qinco", "qinco_aux", "qinco_v2", "rqkmeans", "rqkmeans_plus"}
 
 
 def _load_yaml_file(path: Path | str):

@@ -60,6 +60,23 @@ python main.py \
 configs/qinco_v2_config.yaml
 ```
 
+## 训练 QINCo + 辅助损失
+
+`qinco_aux` 基于 QINCo v1，额外加入码本多样性损失和码本利用率损失，会生成独立的 checkpoint、日志目录和 codebook 文件。
+
+```bash
+python main.py \
+  --model_name qinco_aux \
+  --dataset_name <DATASET> \
+  --embedding_model <EMBEDDING_MODEL>
+```
+
+对应配置文件：
+
+```text
+configs/qinco_aux_config.yaml
+```
+
 ## 输入文件要求
 
 默认会读取：

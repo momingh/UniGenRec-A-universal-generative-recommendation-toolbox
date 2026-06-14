@@ -117,11 +117,26 @@ class Trainer:
         self.logger.info(f"DataLoader: batch_size={self.batch_size}, num_workers={self.num_workers}")
 
         params_to_optimize = list(filter(lambda p: p.requires_grad, self.model.parameters()))
+        recreate_optimizer_each_epoch = self.model_name.lower().startswith("qinco")
         optimizer = None
         if params_to_optimize:
-            optimizer_class = getattr(torch.optim, self.optimizer_name)
-            optimizer = optimizer_class(params_to_optimize, lr=self.lr, weight_decay=self.weight_decay)
-            self.logger.info(f"优化器: {self.optimizer_name}, LR: {self.lr}, WeightDecay: {self.weight_decay}")
+            if recreate_optimizer_each_epoch:
+                optimizer_class = torch.optim.AdamW
+                if self.optimizer_name != "AdamW":
+                    self.logger.warning(
+                        "QINCo 系列模型要求每个 epoch 重新创建 AdamW；"
+                        "当前配置 optimizer=%s 将被忽略。",
+                        self.optimizer_name,
+                    )
+                self.logger.info(
+                    "优化器: AdamW, LR: %s, WeightDecay: %s, QINCo 系列每个 epoch 重新创建。",
+                    self.lr,
+                    self.weight_decay,
+                )
+            else:
+                optimizer_class = getattr(torch.optim, self.optimizer_name)
+                optimizer = optimizer_class(params_to_optimize, lr=self.lr, weight_decay=self.weight_decay)
+                self.logger.info(f"优化器: {self.optimizer_name}, LR: {self.lr}, WeightDecay: {self.weight_decay}")
             if self.max_grad_norm is not None and self.max_grad_norm > 0:
                 self.logger.info(f"梯度裁剪: max_grad_norm={self.max_grad_norm}")
         else:
@@ -164,6 +179,8 @@ class Trainer:
         pbar = tqdm(range(self.epochs), desc=f"Training {self.model_name}", ncols=self.PROGRESS_NCOLS)
         for epoch in pbar:
             self.model.train()
+            if recreate_optimizer_each_epoch and params_to_optimize:
+                optimizer = optimizer_class(params_to_optimize, lr=self.lr, weight_decay=self.weight_decay)
             epoch_loss_sum = defaultdict(float)
             for batch in train_loader:
                 loss_dict = {}

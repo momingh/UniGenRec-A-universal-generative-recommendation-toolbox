@@ -20,7 +20,7 @@ def main():
         '--model_name',
         type=str,
         required=True,
-        choices=['rqvae', 'rqvae_faiss', 'opq', 'qinco', 'qinco_v2', 'rqkmeans', 'rqkmeans_plus'],
+        choices=['rqvae', 'rqvae_faiss', 'opq', 'qinco', 'qinco_aux', 'qinco_v2', 'rqkmeans', 'rqkmeans_plus'],
         help='要使用的量化器模型名称。'
     )
     parser.add_argument('--dataset_name', type=str, required=True, help='数据集名称 (e.g., Baby)')
