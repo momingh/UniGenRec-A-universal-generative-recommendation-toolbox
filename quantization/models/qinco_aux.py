@@ -311,9 +311,12 @@ class QINCO_AUX(nn.Module):
         if loss_aux is not None:
             loss_total = loss_total + loss_aux
 
+        batch_size = max(int(target.shape[0]), 1)
+        loss_recon = (xhat - target).pow(2).sum() * (self.db_scale ** 2) / batch_size
+
         loss_dict = {
             "loss_total": loss_total,
-            "loss_recon": (xhat - target).pow(2).mean(),
+            "loss_recon": loss_recon,
         }
         if loss_aux is not None:
             loss_dict["loss_aux"] = loss_aux

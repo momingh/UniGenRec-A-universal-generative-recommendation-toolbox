@@ -226,7 +226,8 @@ class QINCO_V2(nn.Module):
         else:
             loss_total = losses.sum() / normalizer
 
-        loss_recon = (xhat - target).pow(2).mean()
+        batch_size = max(int(target.shape[0]), 1)
+        loss_recon = (xhat - target).pow(2).sum() * (self.db_scale ** 2) / batch_size
         return {
             "loss_total": loss_total,
             "loss_recon": loss_recon,
