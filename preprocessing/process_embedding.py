@@ -46,12 +46,6 @@ def parse_args():
     parser.add_argument("--dataset_type", default="amazon", choices=["amazon", "movielens"], help="数据集类型")
     parser.add_argument("--data_version", default="14", choices=["14", "18"], help="Amazon 版本")
     parser.add_argument("--save_root", default="../datasets", help="预处理数据根目录")
-    parser.add_argument(
-        "--text_format",
-        default="metadata_sentence",
-        choices=["metadata_sentence", "rpg_sentence", "unigenrec"],
-        help="[text/vlm] item 文本构造格式，默认直接读取 item.json 的 metadata_sentence 字段",
-    )
     parser.add_argument("--image_root", default="../datasets", help="包含 amazonXX/Images 的根目录")
 
     parser.add_argument("--model_name_or_path", default=DEFAULT_LOCAL_TEXT_MODEL, help="[text_local] 本地 Transformer 模型")
@@ -73,7 +67,7 @@ def parse_args():
     parser.add_argument("--vlm_prompt_template", default="Represent this item for recommendation: {}", help="[vlm_fused] prompt 模板")
 
     parser.add_argument("--model_cache_dir", default=None, help="Hugging Face 缓存目录")
-    parser.add_argument("--batch_size", type=int, default=32, help="批处理大小")
+    parser.add_argument("--batch_size", type=int, default=100, help="批处理大小")
     parser.add_argument("--pca_dim", type=int, default=512, help="PCA 目标维度，<=0 不降维")
     parser.add_argument("--gpu_id", type=int, default=0, help="GPU ID，<0 使用 CPU")
 

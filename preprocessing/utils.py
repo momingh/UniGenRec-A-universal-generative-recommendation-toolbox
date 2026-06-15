@@ -330,57 +330,29 @@ def load_review_interaction_texts(
     return review_texts, index_records
 
 
-def build_rpg_sentence_text(meta_data: Dict) -> str:
-    return build_metadata_sentence(meta_data)
-
-
 def build_text_map(args: argparse.Namespace, id2item: Dict[str, str], item_meta: Dict[str, Dict]) -> Dict[str, str]:
     """根据 `dataset_type` 从 `item_meta` 构建文本映射。"""
     if not item_meta:
          print("[WARN] item_meta 为空，无法构建 text_map。")
          return {}
 
-    text_format = getattr(args, "text_format", "unigenrec")
-    if args.dataset_type == "amazon" and text_format == "metadata_sentence":
-        print("将直接使用 item.json 中的 metadata_sentence 字段构建 item 文本。")
+    if args.dataset_type == "amazon":
+        print("将使用 UniGenRec metadata sentence 标准格式构建 item 文本。")
         text_map = {}
         missing_meta_count = 0
-        missing_sentence_count = 0
 
-        for new_id_str, orig_id in id2item.items():
-            meta_data = item_meta.get(new_id_str)
-            if not meta_data:
-                missing_meta_count += 1
-                continue
-
-            text = meta_data.get("metadata_sentence", "")
-            if not isinstance(text, str) or not text.strip():
-                missing_sentence_count += 1
-                continue
-
-            text_map[orig_id] = text
-
-        if missing_meta_count > 0:
-            print(f"[WARN] {missing_meta_count} 个 item 在 item.json 中缺少元数据。")
-        if missing_sentence_count > 0:
-            raise RuntimeError(
-                f"{missing_sentence_count} 个 item 缺少 metadata_sentence；"
-                "请先重新运行 preprocessing/process_data.py，或显式使用 --text_format rpg_sentence 回退生成。"
-            )
-        return text_map
-
-    if args.dataset_type == "amazon" and text_format == "rpg_sentence":
-        print("将使用 RPG metadata.sentence 兼容格式构建 item 文本。")
-        text_map = {}
-        missing_meta_count = 0
         for new_id_str, orig_id in id2item.items():
             meta_data = item_meta.get(new_id_str)
             if not meta_data:
                 missing_meta_count += 1
                 text_map[orig_id] = "N/A"
                 continue
-            text = meta_data.get("metadata_sentence") or build_rpg_sentence_text(meta_data)
+
+            text = build_metadata_sentence(meta_data)
+            if not isinstance(text, str):
+                text = str(text)
             text_map[orig_id] = text if text.strip() else "N/A"
+
         if missing_meta_count > 0:
             print(f"[WARN] {missing_meta_count} 个 item 在 item.json 中缺少元数据。")
         return text_map
@@ -388,15 +360,6 @@ def build_text_map(args: argparse.Namespace, id2item: Dict[str, str], item_meta:
     features = []
     if args.dataset_type == 'movielens':
         features = [('title',), ('description',), ('genres',), ('year',)]
-    elif args.dataset_type == 'amazon':
-        features = [
-            ('title_text', 'title'),
-            ('price_text', 'price'),
-            ('brand_text', 'brand'),
-            ('feature_text', 'feature'),
-            ('categories_text', 'categories', 'category'),
-            ('description_text', 'description'),
-        ]
     else:
         print(f"[WARN] 未知的 dataset_type: {args.dataset_type}，将尝试使用通用字段 ['title', 'description']")
         features = [('title',), ('description',)]

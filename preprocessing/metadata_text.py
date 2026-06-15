@@ -6,17 +6,20 @@ METADATA_SENTENCE_FIELDS = ["title", "price", "brand", "feature", "categories", 
 
 
 def list_to_str(value) -> str:
-    return ", ".join(map(str, value)) if isinstance(value, list) else str(value or "")
+    return " ".join(str(item) for item in value) if isinstance(value, list) else str(value)
 
 
 def metadata_clean_text(raw_text) -> str:
     text = list_to_str(raw_text)
     text = html.unescape(text)
-    text = text.strip()
     text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"[\n\t]", " ", text)
-    text = re.sub(r" +", " ", text)
-    text = re.sub(r"[^\x00-\x7F]", " ", text)
+    text = re.sub(r"[^\w\s.,!?-]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    text = text.strip()
+
+    if not text.endswith((".", "!", "?")):
+        text += "."
+
     return text
 
 
@@ -34,8 +37,8 @@ def metadata_sent_process(raw) -> str:
     elif isinstance(raw, list):
         for value in raw:
             sentence += metadata_clean_text(value)
-    elif raw is not None:
-        sentence = metadata_clean_text(raw)
+    else:
+        sentence = metadata_clean_text(str(raw))
     return sentence + " "
 
 

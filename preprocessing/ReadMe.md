@@ -76,7 +76,7 @@ review_api
 
 如果 `--pca_dim > 0` 且原始维度大于目标维度，会额外保存 `-pca<pca_dim>.npy` 文件。原始 `.npy` 也会保留。
 
-Amazon item 文本 embedding 默认读取 `<dataset>.item.json` 中的 `metadata_sentence` 字段；如果缺少该字段，请先重新运行 `process_data.py`。
+Amazon item 文本 embedding 默认从 `<dataset>.item.json` 的原始 metadata 字段按统一的 `metadata_sentence` 标准格式重建，不再提供多条文本处理路径。
 
 ### 3.1 本地 item 文本 embedding
 
