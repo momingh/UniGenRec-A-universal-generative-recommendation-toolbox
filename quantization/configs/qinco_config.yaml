@@ -37,10 +37,18 @@ qinco:
     optimizer: "AdamW"
     # 生成 code 时使用哪个 checkpoint：
     #   final: 使用最后一次训练模型，保持旧行为。
-    #   best_val: 使用验证集 MSE 最优模型，并启用 early_stop_patience。
+    #   best_val: 使用验证集 MSE 最优模型。
     checkpoint_selection: "best_val"
-    # checkpoint_selection=best_val 时，验证集 MSE 连续多少个 epoch 未提升后早停；<=0 表示不早停。
-    # final
+    # Plateau LR scheduler：验证集指标 10 个 epoch 不提升则 LR *= 0.1，
+    # 50 个 epoch 不提升则停止；LR 低于 min_lr 时停止。
+    # 启用后，early_stop_patience 不参与停止决策。
+    lr_scheduler: "plateau"
+    lr_decay_patience: 10
+    lr_stop_patience: 50
+    lr_decay_factor: 0.1
+    min_lr: 0.000002
+    # checkpoint_selection=best_val 且 lr_scheduler=none 时，
+    # 验证集 MSE 连续多少个 epoch 未提升后早停；<=0 表示不早停。
     early_stop_patience: 30
     # best_val 的验证指标；mse 对应模型 compute_loss 返回的 loss_recon。
     validation_metric: "mse"

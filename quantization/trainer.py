@@ -62,6 +62,30 @@ class Trainer:
         ).lower()
         if self.validation_metric not in {"mse", "loss_total"}:
             raise ValueError("validation_metric must be one of: mse, loss_total.")
+        self.lr_scheduler = str(self.train_cfg.get("lr_scheduler", "none")).lower()
+        scheduler_aliases = {
+            "false": "none",
+            "none": "none",
+            "off": "none",
+            "plateau": "plateau",
+            "reduce_on_plateau": "plateau",
+        }
+        if self.lr_scheduler not in scheduler_aliases:
+            raise ValueError("lr_scheduler must be one of: none, plateau.")
+        self.lr_scheduler = scheduler_aliases[self.lr_scheduler]
+        self.lr_decay_patience = int(self.train_cfg.get("lr_decay_patience", 10))
+        self.lr_stop_patience = int(self.train_cfg.get("lr_stop_patience", 50))
+        self.lr_decay_factor = float(self.train_cfg.get("lr_decay_factor", 0.1))
+        self.min_lr = float(self.train_cfg.get("min_lr", 2e-6))
+        if self.lr_scheduler == "plateau":
+            if self.lr_decay_patience <= 0:
+                raise ValueError("lr_decay_patience must be positive when lr_scheduler=plateau.")
+            if self.lr_stop_patience <= 0:
+                raise ValueError("lr_stop_patience must be positive when lr_scheduler=plateau.")
+            if not 0 < self.lr_decay_factor < 1:
+                raise ValueError("lr_decay_factor must be between 0 and 1 when lr_scheduler=plateau.")
+            if self.min_lr <= 0:
+                raise ValueError("min_lr must be positive when lr_scheduler=plateau.")
         self.eval_metrics_interval = int(self.train_cfg.get("eval_metrics_interval", 100) or 0)
         self.metrics_batch_size = int(
             self.train_cfg.get("metrics_batch_size", self.predict_batch_size)
@@ -141,6 +165,19 @@ class Trainer:
                 self.logger.info(f"梯度裁剪: max_grad_norm={self.max_grad_norm}")
         else:
             self.logger.info("模型没有可训练参数，不创建优化器。")
+        use_plateau_lr_scheduler = self.lr_scheduler == "plateau" and val_loader is not None
+        if self.lr_scheduler == "plateau" and val_loader is None:
+            self.logger.warning("lr_scheduler=plateau 需要验证集；当前没有验证集，将禁用 Plateau LR scheduler。")
+        if use_plateau_lr_scheduler:
+            self.logger.info(
+                "Plateau LR scheduler: validation_metric=%s, decay_patience=%d, "
+                "stop_patience=%d, decay_factor=%s, min_lr=%s。",
+                self.validation_metric,
+                self.lr_decay_patience,
+                self.lr_stop_patience,
+                self.lr_decay_factor,
+                self.min_lr,
+            )
         if self.eval_metrics_interval > 0:
             self.logger.info(
                 "训练中指标评估: interval=%d epochs, metrics_batch_size=%d, prefix_cosine_max_items=%d",
@@ -160,12 +197,19 @@ class Trainer:
                 )
                 use_best_val = False
             else:
-                self.logger.info(
-                    "checkpoint_selection=best_val，使用验证集 %s 选择 checkpoint，"
-                    "early_stop_patience=%d epochs。",
-                    self.validation_metric,
-                    self.early_stop_patience,
-                )
+                if use_plateau_lr_scheduler:
+                    self.logger.info(
+                        "checkpoint_selection=best_val，使用验证集 %s 选择 checkpoint，"
+                        "停止策略由 Plateau LR scheduler 控制。",
+                        self.validation_metric,
+                    )
+                else:
+                    self.logger.info(
+                        "checkpoint_selection=best_val，使用验证集 %s 选择 checkpoint，"
+                        "early_stop_patience=%d epochs。",
+                        self.validation_metric,
+                        self.early_stop_patience,
+                    )
         else:
             self.logger.info("checkpoint_selection=final，使用最后一次训练模型生成 code。")
 
@@ -176,11 +220,14 @@ class Trainer:
         avg_losses = {"loss_total": float("inf")}
         avg_val_loss = float("inf")
         avg_val_metric = float("inf")
+        current_lr = self.lr
+        plateau_metric_history = []
+        plateau_last_lr_update_epoch = 0
         pbar = tqdm(range(self.epochs), desc=f"Training {self.model_name}", ncols=self.PROGRESS_NCOLS)
         for epoch in pbar:
             self.model.train()
             if recreate_optimizer_each_epoch and params_to_optimize:
-                optimizer = optimizer_class(params_to_optimize, lr=self.lr, weight_decay=self.weight_decay)
+                optimizer = optimizer_class(params_to_optimize, lr=current_lr, weight_decay=self.weight_decay)
             epoch_loss_sum = defaultdict(float)
             for batch in train_loader:
                 loss_dict = {}
@@ -239,45 +286,70 @@ class Trainer:
                     postfix_str += f"|VMSE={avg_val_metric:.4f}"
                 if 'loss_recon' in avg_losses: postfix_str += f"|Rec={avg_losses['loss_recon']:.4f}"
                 if 'loss_latent' in avg_losses: postfix_str += f"|Lat={avg_losses['loss_latent']:.4f}"
+            if use_plateau_lr_scheduler:
+                postfix_str += f"|LR={current_lr:.2g}"
             pbar.set_postfix_str(postfix_str)
 
             epoch_num = epoch + 1
             last_epoch_num = epoch_num
-            if use_best_val:
+            should_stop_training = False
+            if val_loader and (use_best_val or use_plateau_lr_scheduler):
                 if avg_val_metric < best_val_metric:
                     best_val_metric = avg_val_metric
                     best_epoch = epoch_num
                     epochs_without_improvement = 0
-                    torch.save(self.model.state_dict(), best_path)
-                    self.logger.info(
-                        "💾 New best validation %s: %.6f at epoch %d，已保存至: %s",
-                        self.validation_metric,
-                        best_val_metric,
-                        best_epoch,
-                        best_path,
-                    )
+                    if use_best_val:
+                        torch.save(self.model.state_dict(), best_path)
+                        self.logger.info(
+                            "💾 New best validation %s: %.6f at epoch %d，已保存至: %s",
+                            self.validation_metric,
+                            best_val_metric,
+                            best_epoch,
+                            best_path,
+                        )
+                    else:
+                        self.logger.info(
+                            "New best validation %s: %.6f at epoch %d。",
+                            self.validation_metric,
+                            best_val_metric,
+                            best_epoch,
+                        )
                 else:
                     epochs_without_improvement += 1
                     self.logger.info(
                         "验证集 %s 未提升: 当前 %.6f，最佳 %.6f at epoch %d，"
-                        "early stop %d/%d",
+                        "%s %d/%d",
                         self.validation_metric,
                         avg_val_metric,
                         best_val_metric,
                         best_epoch,
+                        "Plateau scheduler" if use_plateau_lr_scheduler else "early stop",
                         epochs_without_improvement,
-                        self.early_stop_patience,
+                        self.lr_stop_patience if use_plateau_lr_scheduler else self.early_stop_patience,
                     )
-                    if (
-                        self.early_stop_patience > 0
-                        and epochs_without_improvement >= self.early_stop_patience
-                    ):
+                    if not use_plateau_lr_scheduler and self.early_stop_patience > 0 and epochs_without_improvement >= self.early_stop_patience:
                         self.logger.info(
                             "⏹️ 验证集 %s 连续 %d epochs 未提升，提前停止训练。",
                             self.validation_metric,
                             self.early_stop_patience,
                         )
-                        break
+                        should_stop_training = True
+
+                if use_plateau_lr_scheduler:
+                    plateau_metric_history.append(float(avg_val_metric))
+                    current_lr, plateau_last_lr_update_epoch, scheduler_should_stop = (
+                        self._apply_plateau_lr_scheduler(
+                            metric_history=plateau_metric_history,
+                            epoch_num=epoch_num,
+                            current_lr=current_lr,
+                            last_lr_update_epoch=plateau_last_lr_update_epoch,
+                            optimizer=optimizer,
+                        )
+                    )
+                    should_stop_training = should_stop_training or scheduler_should_stop
+
+            if should_stop_training:
+                break
 
             if self._should_evaluate_training_metrics(epoch_num):
                 self._evaluate_training_metrics(embeddings_data, ckpt_dir, epoch_num)
@@ -309,6 +381,68 @@ class Trainer:
         self.logger.info("=" * 100)
 
         return selected_path if os.path.exists(selected_path) else None
+
+    def _apply_plateau_lr_scheduler(
+        self,
+        metric_history,
+        epoch_num: int,
+        current_lr: float,
+        last_lr_update_epoch: int,
+        optimizer,
+    ):
+        best_metric = min(metric_history)
+
+        stop_window = metric_history[-self.lr_stop_patience:]
+        if (
+            epoch_num > last_lr_update_epoch + self.lr_stop_patience
+            and len(stop_window) == self.lr_stop_patience
+            and all(metric > best_metric for metric in stop_window)
+        ):
+            self.logger.info(
+                "Plateau LR scheduler: 验证集 %s 连续 %d epochs 未优于历史最佳 %.6f，停止训练。",
+                self.validation_metric,
+                self.lr_stop_patience,
+                best_metric,
+            )
+            return current_lr, epoch_num, True
+
+        decay_window = metric_history[-self.lr_decay_patience:]
+        if (
+            epoch_num > last_lr_update_epoch + self.lr_decay_patience
+            and len(decay_window) == self.lr_decay_patience
+            and all(metric > best_metric for metric in decay_window)
+        ):
+            new_lr = current_lr * self.lr_decay_factor
+            last_lr_update_epoch = epoch_num
+            if new_lr < self.min_lr:
+                self._set_optimizer_lr(optimizer, 0.0)
+                self.logger.info(
+                    "Plateau LR scheduler: LR %.6g < min_lr %.6g，停止训练。",
+                    new_lr,
+                    self.min_lr,
+                )
+                return 0.0, last_lr_update_epoch, True
+
+            self._set_optimizer_lr(optimizer, new_lr)
+            self.logger.info(
+                "Plateau LR scheduler: 验证集 %s 连续 %d epochs 未优于历史最佳 %.6f，"
+                "LR %.6g -> %.6g。",
+                self.validation_metric,
+                self.lr_decay_patience,
+                best_metric,
+                current_lr,
+                new_lr,
+            )
+            return new_lr, last_lr_update_epoch, False
+
+        return current_lr, last_lr_update_epoch, False
+
+    @staticmethod
+    def _set_optimizer_lr(optimizer, lr: float):
+        if optimizer is None:
+            return
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
 
     def _select_validation_metric(self, avg_val_losses):
         if self.validation_metric == "mse":
