@@ -37,7 +37,6 @@ def train_faiss_rq(data, codebook_sizes, verbose=True):
         rq = faiss.ResidualQuantizer(dim, num_levels, nbits[0])
     else:
         rq = faiss.ResidualQuantizer(dim, nbits)
-    rq.train_type = faiss.ResidualQuantizer.Train_default
     rq.max_beam_size = 1
 
     rq.train(data)
