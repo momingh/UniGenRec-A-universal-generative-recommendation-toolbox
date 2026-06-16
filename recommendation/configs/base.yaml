@@ -4,6 +4,7 @@
 training_params:
   lr: 0.0001
   batch_size: 128
+  steps: null
   num_epochs: 200
   early_stop: 10
   seed: 2023

@@ -1,6 +1,5 @@
 import argparse
 import logging
-import math
 import torch
 import torch.optim as optim
 import pprint
@@ -8,6 +7,7 @@ from typing import Optional # ✅ (新增) 导入 Optional
 
 # ✅ 1. 从 torch.utils.data 直接导入 DataLoader
 from torch.utils.data import DataLoader 
+from transformers.optimization import get_scheduler
 from dataset import GenRecDataset, item2code
 from tokenizer import get_tokenizer       
 from trainer import train_one_epoch, evaluate
@@ -31,6 +31,22 @@ if str(root_parent) not in sys.path:
 from recommendation.models.generation.prefix_tree import Trie, build_trie_from_codebook
 
 
+def get_total_steps(training_params, train_loader):
+    total_steps = training_params.get('steps')
+    if total_steps is None:
+        total_steps = training_params.get('total_steps')
+    if total_steps is not None:
+        return int(total_steps)
+
+    num_epochs = training_params.get('epochs')
+    if num_epochs is None:
+        num_epochs = training_params.get('num_epochs')
+    if num_epochs is None:
+        raise ValueError("training_params must define either steps/total_steps or epochs/num_epochs")
+
+    return len(train_loader) * int(num_epochs)
+
+
 def build_lr_scheduler(optimizer, train_loader, training_params):
     scheduler_name = training_params.get('scheduler')
     if scheduler_name is None:
@@ -45,35 +61,20 @@ def build_lr_scheduler(optimizer, train_loader, training_params):
         raise ValueError(f"Unsupported scheduler: {scheduler_name}")
 
     warmup_steps = int(training_params.get('warmup_steps', 0) or 0)
-    # hold_steps: 在 warmup 之后、余弦退火之前，让学习率恒定在峰值 (base lr) 的步数。
-    # 例如 hold_steps=10000 表示前 10000 步保持 lr=0.01，之后才开始余弦衰减。
-    hold_steps = int(training_params.get('hold_steps', 0) or 0)
-    total_steps = training_params.get('total_steps', training_params.get('steps'))
-    if total_steps is None:
-        total_steps = len(train_loader) * int(training_params['num_epochs'])
-    total_steps = int(total_steps)
+    total_steps = get_total_steps(training_params, train_loader)
     if total_steps <= 0:
         return None
 
-    # 余弦退火阶段的起点 = warmup + hold
-    decay_start = warmup_steps + hold_steps
-
-    def lr_lambda(current_step):
-        # 阶段 1: 线性 warmup (warmup_steps=0 时跳过)
-        if current_step < warmup_steps:
-            return float(current_step) / float(max(1, warmup_steps))
-        # 阶段 2: 恒定保持峰值学习率
-        if current_step < decay_start:
-            return 1.0
-        # 阶段 3: 余弦退火 从 1.0 -> 0.0
-        progress = float(current_step - decay_start) / float(max(1, total_steps - decay_start))
-        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
-
     logging.info(
-        f"Using cosine LR scheduler: warmup_steps={warmup_steps}, "
-        f"hold_steps={hold_steps}, decay_start={decay_start}, total_steps={total_steps}"
+        f"Using HuggingFace cosine LR scheduler: warmup_steps={warmup_steps}, "
+        f"total_steps={total_steps}"
     )
-    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    return get_scheduler(
+        name="cosine",
+        optimizer=optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
 
 
 def main():
