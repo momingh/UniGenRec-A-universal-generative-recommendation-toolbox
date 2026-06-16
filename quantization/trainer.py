@@ -14,7 +14,7 @@ class Trainer:
     通用量化器 Trainer (复用 TensorDataset)
     """
 
-    FULL_TRAIN_VAL_SPLIT = 0.05
+    FULL_TRAIN_VAL_SPLIT = 0.20
     PROGRESS_NCOLS = 120
 
     def __init__(self, config: dict, model: torch.nn.Module, device: torch.device):
@@ -134,7 +134,7 @@ class Trainer:
                 test_size=self.FULL_TRAIN_VAL_SPLIT,
                 random_state=self.seed
             )
-            self.logger.info("validation_split <= 0，训练集使用全集，验证集从训练集中抽取 5%")
+            self.logger.info("validation_split <= 0，训练集使用全集，验证集从训练集中抽取 20%")
 
         train_loader = DataLoader(Subset(dataset, train_idx), batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
         val_loader = DataLoader(Subset(dataset, val_idx), batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True) if val_idx else None
