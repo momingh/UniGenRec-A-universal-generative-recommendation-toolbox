@@ -9,8 +9,14 @@ def list_to_str(value) -> str:
     return " ".join(str(item) for item in value) if isinstance(value, list) else str(value)
 
 
+def normalize_legacy_bool_token_case(text: str) -> str:
+    """Match the legacy Amazon metadata parser's boolean token casing."""
+    return text.replace("true", "True").replace("false", "False")
+
+
 def metadata_clean_text(raw_text) -> str:
     text = list_to_str(raw_text)
+    text = normalize_legacy_bool_token_case(text)
     text = html.unescape(text)
     text = re.sub(r"<[^>]+>", "", text)
     text = re.sub(r"[^\w\s.,!?-]", " ", text)
