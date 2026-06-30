@@ -8,11 +8,16 @@ import logging
 # trainer 不再需要关心 metrics 的具体实现
 # from metrics import ... (这些引用可以删除了)
 
+TQDM_KWARGS = {
+    "dynamic_ncols": True,
+    "leave": False,
+}
+
 def train_one_epoch(model, train_loader, optimizer, device, scheduler=None, max_grad_norm=None):
     """执行一个训练周期 (此函数不变)"""
     model.train()
     total_loss = 0.0
-    for batch in tqdm(train_loader, desc="Training"):
+    for batch in tqdm(train_loader, desc="Training", **TQDM_KWARGS):
         batch = {k: v.to(device) for k, v in batch.items()}
         optimizer.zero_grad()
         outputs = model.forward(batch)
@@ -43,7 +48,7 @@ def evaluate(model, eval_loader, topk_list: List[int], device) -> Dict[str, floa
     total_count = 0.0
     
     with torch.no_grad():
-        for batch in tqdm(eval_loader, desc="Evaluating"):
+        for batch in tqdm(eval_loader, desc="Evaluating", **TQDM_KWARGS):
             # 将数据移动到设备
             batch = {k: v.to(device) for k, v in batch.items()}
             

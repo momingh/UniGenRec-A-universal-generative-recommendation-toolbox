@@ -2,7 +2,8 @@ from typing import Any, Dict, List, Optional
 import torch
 import logging
 logger = logging.getLogger(__name__)
-import transformers
+from transformers import T5Config, T5ForConditionalGeneration
+from transformers.generation.logits_process import LogitsProcessorList
 
 import sys
 from pathlib import Path
@@ -11,15 +12,25 @@ if str(root) not in sys.path:
     sys.path.insert(0, str(root))
 
 from recommendation.metrics import recall_at_k, ndcg_at_k
-from recommendation.models.generation.prefix_tree import Trie
 from recommendation.models.generation.logits_processor import TIGERLogitsProcessor
 from recommendation.models.abstract_model import AbstractModel
-from transformers.generation.logits_process import LogitsProcessorList
 
 
-
-T5ForConditionalGeneration = transformers.T5ForConditionalGeneration
-T5Config = transformers.T5Config
+T5_CONFIG_KEYS = {
+    'd_model',
+    'd_kv',
+    'd_ff',
+    'num_layers',
+    'num_decoder_layers',
+    'num_heads',
+    'relative_attention_num_buckets',
+    'relative_attention_max_distance',
+    'dropout_rate',
+    'layer_norm_epsilon',
+    'initializer_factor',
+    'feed_forward_proj',
+    'tie_word_embeddings',
+}
 
 
 class TIGER(AbstractModel):
@@ -27,7 +38,7 @@ class TIGER(AbstractModel):
   def __init__(
       self,
       config: Dict[str, Any],
-      prefix_trie: Optional[Trie] = None,
+      prefix_trie: Optional[Any] = None,
       item_to_code_map: Optional[Dict[int, List[int]]] = None
   ):
     super().__init__(config)
@@ -35,7 +46,7 @@ class TIGER(AbstractModel):
     token_params = config['token_params']
     t5_model_params = {
         k: v for k, v in model_params.items()
-        if k != 'num_epochs'
+        if k in T5_CONFIG_KEYS
     }
     t5config = T5Config(
         **t5_model_params,
@@ -45,22 +56,20 @@ class TIGER(AbstractModel):
     )
 
     self.t5 = T5ForConditionalGeneration(config=t5config)
-    self.t5.resize_token_embeddings(config['token_params']['vocab_size'])
     self.n_params_str = self._calculate_n_parameters()
 
-    self._item_to_code_map = item_to_code_map
     if item_to_code_map:
         logger.info(f"TIGER 已接收 item_to_code_map,包含 {len(item_to_code_map)} 个 item。")
 
     eval_params = config.get('evaluation_params', {})
-    self.use_logits_processor = bool(
+    use_logits_processor = bool(
         eval_params.get('use_logits_processor', eval_params.get('use_prefix_trie', False))
     )
     self.logits_processor = None
-    if self.use_logits_processor and item_to_code_map:
+    if use_logits_processor and item_to_code_map:
         self.logits_processor = TIGERLogitsProcessor(item_to_code_map, config)
         logger.info("TIGER 已启用 LogitsProcessor 约束解码。")
-    elif self.use_logits_processor:
+    elif use_logits_processor:
         logger.warning("TIGER 请求启用 LogitsProcessor,但未收到 item_to_code_map。")
     else:
         logger.info("TIGER 未启用约束解码。")
@@ -119,7 +128,6 @@ class TIGER(AbstractModel):
     input_ids = batch['input_ids']
     attention_mask = batch['attention_mask']
     labels = batch['labels']  # (batch_size, code_len)
-    device = input_ids.device
     batch_size = input_ids.shape[0]
 
     # 1. 生成:beam search 输出 (batch_size * beam_size, 1 + code_len)
@@ -137,7 +145,7 @@ class TIGER(AbstractModel):
     preds = preds[:, 1:1 + code_len].view(batch_size, beam_size, code_len)
 
     # 3. 命中矩阵 (batch_size, beam_size)
-    pos_index = self._calculate_pos_index(preds, labels, maxk=beam_size).to(device)
+    pos_index = self._calculate_pos_index(preds, labels)
 
     # 4. 累加指标(返回 sum,由 trainer 统一除以总样本数)
     batch_metrics = {'count': batch_size}
@@ -148,14 +156,13 @@ class TIGER(AbstractModel):
     return batch_metrics
   
   @staticmethod
-  def _calculate_pos_index(preds: torch.Tensor, labels: torch.Tensor, maxk: int) -> torch.Tensor:
+  def _calculate_pos_index(preds: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
         计算命中矩阵:对每个样本,标记哪个 beam 完整命中了 ground-truth code。
 
         Args:
             preds:  (B, maxk, L_pred) 每个样本 maxk 个 beam 的预测 code
             labels: (B, L_label)      每个样本的 ground-truth code
-            maxk:   beam 数量
 
         Returns:
             (B, maxk) 的 bool 张量。每行最多一个 True(取排名最靠前的命中 beam),
@@ -168,7 +175,7 @@ class TIGER(AbstractModel):
 
         # 对齐长度:生成不足则补 0,过长则截断(正常 max_new_tokens=code_len 时两者相等)
         if L_pred < L_label:
-            padding = torch.zeros((preds.shape[0], maxk, L_label - L_pred), dtype=preds.dtype)
+            padding = torch.zeros((preds.shape[0], preds.shape[1], L_label - L_pred), dtype=preds.dtype)
             preds = torch.cat([preds, padding], dim=2)
         elif L_pred > L_label:
             preds = preds[:, :, :L_label]

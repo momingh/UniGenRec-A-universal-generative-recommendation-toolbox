@@ -12,7 +12,7 @@ cd /at2-data/mominghao/gen_rec/UniGenRec-A-universal-generative-recommendation-t
 
 ```bash
 python main.py \
-  --model_name rqvae_faiss \
+  --model_name qinco \
   --dataset_name Beauty \
   --embedding_model text-embedding-3-large-pca512
 ```

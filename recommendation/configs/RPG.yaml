@@ -17,6 +17,7 @@ model_params:
 
 # ✨ 范例：如果 RPG 需要不同的 batch size，可以在这里覆盖 base.yaml
 training_params:
+  num_epochs: 150
   batch_size: 128 # 256
   lr: 0.003 # 0.01
   weight_decay: 0.0

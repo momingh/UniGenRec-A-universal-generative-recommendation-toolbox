@@ -17,7 +17,7 @@ model_params:
 
 training_params:
   lr: 0.0003          # 对齐 NonameUntitled/tiger:固定 3e-4
-  eval_interval: 20
+  eval_interval: 5
   batch_size: 256
   num_epochs: 400
   scheduler: none     # 对齐 repo:不使用 scheduler,全程恒定 lr

@@ -6,7 +6,7 @@ training_params:
   batch_size: 128
   steps: null
   num_epochs: 200
-  early_stop: 10
+  early_stop: 20
   seed: 2023
   device: 'cuda:0'
   num_workers: 4

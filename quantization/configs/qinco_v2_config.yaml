@@ -17,11 +17,11 @@ qinco_v2:
     # embedding 缩放因子；-1 表示使用 item_embeddings 的最大值自动估计。
     db_scale: -1
     # 每个 QINCoV2Step 内部残差 MLP block 数量 L。
-    num_residual_blocks: 2
+    num_residual_blocks: 4
     # QINCoV2Step 残差块隐藏层维度 h。
     hidden_size: 256
     # 是否在预测码本时追加去重层。
-    has_dup_layer: true
+    has_dup_layer: false
     # 是否像 rqvae_faiss 一样用 FAISS ResidualQuantizer 初始化码本。
     faiss_init: true
     # 是否打印 FAISS ResidualQuantizer 训练信息。
@@ -30,11 +30,28 @@ qinco_v2:
     # loss_weights: [1.0, 1.0, 1.0, 1.0]
 
   training_params:
-    batch_size: 512
-    epochs: 500
-    lr: 0.001
-    weight_decay: 0.0001
+    batch_size: 1024
+    epochs: 3000
+    lr: 0.0001
+    weight_decay: 0.0000
     optimizer: "AdamW"
+    # 生成 code 时使用哪个 checkpoint：
+    #   final: 使用最后一次训练模型，保持旧行为。
+    #   best_val: 使用验证集 MSE 最优模型。
+    checkpoint_selection: "best_val"
+    # Plateau LR scheduler：验证集指标 10 个 epoch 不提升则 LR *= 0.1，
+    # 50 个 epoch 不提升则停止；LR 低于 min_lr 时停止。
+    # 启用后，early_stop_patience 不参与停止决策。
+    lr_scheduler: "plateau"
+    lr_decay_patience: 10
+    lr_stop_patience: 50
+    lr_decay_factor: 0.1
+    min_lr: 0.000002
+    # checkpoint_selection=best_val 且 lr_scheduler=none 时，
+    # 验证集 MSE 连续多少个 epoch 未提升后早停；<=0 表示不早停。
+    early_stop_patience: 30
+    # best_val 的验证指标；mse 对应模型 compute_loss 返回的 loss_recon。
+    validation_metric: "mse"
     # 每隔多少 epoch 评估码本利用率、码本熵和 prefix 内 embedding 余弦相似度；<=0 表示关闭。
     eval_metrics_interval: 100
     # 每个 prefix group 最多采样多少 item 计算余弦相似度；用于限制大簇评估开销。
