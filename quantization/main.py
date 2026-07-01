@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import os
 
@@ -25,6 +26,13 @@ def main():
     )
     parser.add_argument('--dataset_name', type=str, required=True, help='数据集名称 (e.g., Baby)')
     parser.add_argument(
+        '--embedding_source',
+        type=str,
+        default='text',
+        choices=['text', 'graph'],
+        help='输入 embedding 来源：text=预处理文本 embedding，graph=图模型输出的 item embedding。'
+    )
+    parser.add_argument(
         '--embedding_modality',
         type=str,
         default='text',
@@ -34,13 +42,20 @@ def main():
     parser.add_argument(
         '--embedding_model',
         type=str,
-        required=True,
+        default=None,
         help='文本嵌入来源模型名称 (e.g., sentence-t5-base)。'
+    )
+    parser.add_argument(
+        '--graph_model',
+        type=str,
+        default=None,
+        help='当 embedding_source=graph 时使用的图模型名称，例如 lightgcn。'
     )
     parser.add_argument('--config_path', type=str, default=None, help='配置文件路径。')
     parser.add_argument('--data_base_path', type=str, default=os.path.abspath(os.path.join(BASE_DIR, '../datasets')), help='数据集根目录')
     parser.add_argument('--log_base_path', type=str, default=os.path.abspath(os.path.join(BASE_DIR, '../logs/quantization')), help='日志根目录')
     parser.add_argument('--ckpt_base_path', type=str, default=os.path.abspath(os.path.join(BASE_DIR, '../ckpt/quantization')), help='模型根目录')
+    parser.add_argument('--graph_ckpt_base_path', type=str, default=os.path.abspath(os.path.join(BASE_DIR, '../ckpt/graph')), help='图模型输出根目录')
     parser.add_argument('--codebook_base_path', type=str, default=os.path.abspath(os.path.join(BASE_DIR, '../datasets')), help='码本根目录')
     parser.add_argument('--pca_dim', type=int, default=None, help='可选 PCA 降维目标维度；<=0 表示不降维；未传时读取配置文件。')
     parser.add_argument(
@@ -84,6 +99,14 @@ def main():
     pca_dim = int(pca_dim or 0)
 
     item_embeddings = np.load(embedding_path)
+    mapping_records = None
+    mapping_path = resolve_embedding_mapping_path(args, embedding_path)
+    if mapping_path is not None:
+        item_embeddings, mapping_records = align_embeddings_by_item_mapping(
+            item_embeddings,
+            mapping_path,
+        )
+        logging.info(f"已按 item_id 对齐 embedding mapping: {mapping_path}")
     if pca_dim > 0:
         original_dim = item_embeddings.shape[1]
         if pca_dim >= original_dim:
@@ -112,7 +135,7 @@ def main():
     device = torch.device(config.get('common', {}).get('device', 'cuda:0'))
     logging.info(
         f"任务: model={args.model_name}, dataset={args.dataset_name}, "
-        f"embedding={args.embedding_model}, shape={item_embeddings.shape}, device={device}"
+        f"embedding_source={args.embedding_source}, shape={item_embeddings.shape}, device={device}"
     )
 
     ModelClass = utils.get_model(args.model_name)
@@ -138,7 +161,7 @@ def main():
         dataset_name=args.dataset_name,
         model_name=args.model_name,
         embedding_model=args.embedding_model,
-        embedding_modality=args.embedding_modality
+        embedding_modality=resolve_codebook_modality(args)
     )
     logging.info(f"最终码本将保存到: {final_codebook_path}")
 
@@ -146,8 +169,88 @@ def main():
         embeddings_data=item_embeddings,
         output_path=final_codebook_path
     )
+    if mapping_records is not None:
+        mapping_output_path = final_codebook_path.replace(".npy", ".mapping.jsonl")
+        write_codebook_mapping(mapping_output_path, mapping_records)
+        logging.info(f"已保存 codebook row 到 item 的映射: {mapping_output_path}")
 
     logging.info("\n--- 所有任务完成 ---")
+
+
+def resolve_codebook_modality(args) -> str:
+    if args.embedding_source == "graph":
+        return f"graph-{args.graph_model}"
+    return args.embedding_modality
+
+
+def resolve_embedding_mapping_path(args, embedding_path: str):
+    if args.embedding_source != "graph":
+        return None
+
+    graph_dir = os.path.dirname(os.path.abspath(embedding_path))
+    mapping_path = os.path.join(graph_dir, "final_item_embedding_mapping.jsonl")
+    if not os.path.isfile(mapping_path):
+        raise FileNotFoundError(
+            f"Graph embedding mapping not found: {mapping_path}"
+        )
+    return mapping_path
+
+
+def align_embeddings_by_item_mapping(item_embeddings: np.ndarray, mapping_path: str):
+    if item_embeddings.ndim != 2:
+        raise ValueError(f"item_embeddings 必须是二维数组，实际 shape={item_embeddings.shape}")
+
+    num_items = int(item_embeddings.shape[0])
+    aligned = np.empty_like(item_embeddings)
+    records = [None] * num_items
+    seen_rows = set()
+    seen_item_ids = set()
+
+    with open(mapping_path, "r", encoding="utf-8") as fp:
+        for line_num, line in enumerate(fp, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            source_row = int(obj.get("row_index", line_num - 1))
+            item_id = int(obj["item_id"])
+            if not 0 <= source_row < num_items:
+                raise ValueError(
+                    f"{mapping_path}:{line_num} row_index out of range: {source_row}"
+                )
+            if not 0 <= item_id < num_items:
+                raise ValueError(
+                    f"{mapping_path}:{line_num} item_id out of range: {item_id}"
+                )
+            if source_row in seen_rows:
+                raise ValueError(f"{mapping_path}:{line_num} duplicate row_index: {source_row}")
+            if item_id in seen_item_ids:
+                raise ValueError(f"{mapping_path}:{line_num} duplicate item_id: {item_id}")
+
+            seen_rows.add(source_row)
+            seen_item_ids.add(item_id)
+            aligned[item_id] = item_embeddings[source_row]
+            records[item_id] = {
+                "row_index": item_id,
+                "item_id": item_id,
+                "raw_item_id": obj.get("raw_item_id"),
+            }
+
+    missing_rows = sorted(set(range(num_items)) - seen_rows)
+    missing_item_ids = sorted(set(range(num_items)) - seen_item_ids)
+    if missing_rows:
+        raise ValueError(f"{mapping_path} missing row mappings: {missing_rows[:10]}")
+    if missing_item_ids:
+        raise ValueError(f"{mapping_path} missing item_id mappings: {missing_item_ids[:10]}")
+
+    return aligned, records
+
+
+def write_codebook_mapping(path: str, records):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fp:
+        for record in records:
+            fp.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 if __name__ == '__main__':

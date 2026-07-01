@@ -1,11 +1,13 @@
 import argparse
 import logging
+import random
 import torch
 import torch.optim as optim
 import pprint
 import time
 from contextlib import nullcontext
 
+import numpy as np
 from torch.utils.data import DataLoader
 from transformers.optimization import get_scheduler
 from dataset import GenRecDataset, item2code
@@ -63,8 +65,14 @@ def build_lr_scheduler(optimizer, train_loader, training_params):
     scheduler_name = str(scheduler_name).lower()
     if scheduler_name in {'none', 'null', 'false'}:
         return None
-    if scheduler_name != 'cosine':
+    scheduler_aliases = {
+        'cosine': 'cosine',
+        'constant_with_warmup': 'constant_with_warmup',
+        'warmup_constant': 'constant_with_warmup',
+    }
+    if scheduler_name not in scheduler_aliases:
         raise ValueError(f"Unsupported scheduler: {scheduler_name}")
+    scheduler_name = scheduler_aliases[scheduler_name]
 
     warmup_steps = int(training_params.get('warmup_steps', 0) or 0)
     total_steps = get_total_steps(training_params, train_loader)
@@ -72,11 +80,11 @@ def build_lr_scheduler(optimizer, train_loader, training_params):
         return None
 
     logging.info(
-        f"Using HuggingFace cosine LR scheduler: warmup_steps={warmup_steps}, "
+        f"Using HuggingFace {scheduler_name} LR scheduler: warmup_steps={warmup_steps}, "
         f"total_steps={total_steps}"
     )
     return get_scheduler(
-        name="cosine",
+        name=scheduler_name,
         optimizer=optimizer,
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps,
@@ -93,12 +101,28 @@ def format_lr(optimizer) -> str:
     return f"{get_current_lr(optimizer):.8e}"
 
 
+def reset_run_seed(seed: int) -> None:
+    set_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def make_worker_init_fn(seed: int):
+    def seed_worker(worker_id: int) -> None:
+        worker_seed = seed + worker_id
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
+    return seed_worker
+
+
 def main():
     parser = argparse.ArgumentParser(description="GenRec Universal Training Pipeline")
     parser.add_argument('--model', type=str, default="TIGER", help='模型名稱 (e.g., TIGER, GPT2, RPG)')
     parser.add_argument('--dataset', type=str, default="amazon-musical-instruments-23", help='数据集名稱 (e.g., Beauty)')
     parser.add_argument('--quant_method', type=str, default="rqvae", choices=['rqvae', 'rqvae_faiss', 'opq', 'qinco', 'qinco_aux', 'qinco_v2', 'rqkmeans', 'rqkmeans_plus'], help='量化方法')
-    parser.add_argument('--embedding_modality', type=str, default='text', choices=['text', 'image', 'fused', 'lfused', 'cf'], help='量化模态类型，对应不同的 codebook (默认 text)')
+    parser.add_argument('--embedding_modality', type=str, default='text', help='量化模态类型，对应不同的 codebook (默认 text，例如 graph-lightgcn)')
     parser.add_argument('--eval_only', action='store_true', help='仅加载已有模型，在测试集上直接评估')
 
     args = parser.parse_args()
@@ -112,8 +136,10 @@ def main():
     )
 
     setup_logging(config['log_path'])
-    set_seed(config['training_params']['seed'])
+    run_seed = int(config['training_params']['seed'])
+    reset_run_seed(run_seed)
     logging.info(f"Configuration loaded for {args.model} on {args.dataset} with {args.quant_method}.")
+    logging.info(f"Run seed reset to: {run_seed}")
     logging.info("=" * 50)
     config_str = pprint.pformat(config)
     logging.info("\n" + config_str)
@@ -178,11 +204,14 @@ def main():
     logging.info("Creating DataLoaders...")
 
     is_gpu_training = (torch.cuda.is_available() and num_workers > 0)
+    train_generator = torch.Generator()
+    train_generator.manual_seed(run_seed)
     loader_kwargs = {
         "num_workers": num_workers,
         "collate_fn": collate_fn,
         "pin_memory": is_gpu_training,
-        "persistent_workers": is_gpu_training if num_workers > 0 else False
+        "persistent_workers": is_gpu_training if num_workers > 0 else False,
+        "worker_init_fn": make_worker_init_fn(run_seed),
     }
     eval_loader_kwargs = {
         **loader_kwargs,
@@ -197,6 +226,7 @@ def main():
             train_dataset,
             batch_size=config['training_params']['batch_size'],
             shuffle=True,
+            generator=train_generator,
             **loader_kwargs
         )
         validation_loader = DataLoader(validation_dataset, **eval_loader_kwargs)

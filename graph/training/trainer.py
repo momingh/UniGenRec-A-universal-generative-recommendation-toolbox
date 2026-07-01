@@ -1,8 +1,20 @@
 from dataclasses import dataclass
+import logging
+import time
+from collections.abc import Mapping
+from contextlib import nullcontext
+from numbers import Real
 from typing import Optional
 
 import torch
 from tqdm import tqdm
+
+try:
+    from tqdm.contrib.logging import logging_redirect_tqdm
+except ImportError:
+    logging_redirect_tqdm = nullcontext
+
+TQDM_KWARGS = {"dynamic_ncols": True, "leave": False}
 
 
 @dataclass
@@ -42,62 +54,141 @@ class GraphTrainer:
         early_stop_patience: Optional[int] = None,
     ) -> TrainingState:
         best_state = None
+        best_metrics = None
+        best_test_metrics = None
         epochs_without_improvement = 0
+        epoch_separator = "-" * 80
 
-        for epoch in range(1, int(num_epochs) + 1):
-            self.state.epoch = epoch
-            train_loss = self.train_one_epoch(train_loader)
-            print(f"Epoch {epoch}: train_loss={train_loss:.6f}")
-
-            if valid_data is not None:
-                metrics = self.evaluate_full_sort(
-                    valid_data,
-                    split=valid_split,
-                    batch_size=full_sort_batch_size,
+        with logging_redirect_tqdm():
+            for epoch in range(1, int(num_epochs) + 1):
+                self.state.epoch = epoch
+                epoch_start = time.perf_counter()
+                logging.info(epoch_separator)
+                logging.info(
+                    f"Epoch {epoch:03d}/{int(num_epochs):03d} started | "
+                    f"lr={self._format_lr()}"
                 )
-                print(f"Epoch {epoch}: valid_metrics={metrics}")
+                train_loss = self.train_one_epoch(train_loader)
 
-                if monitor_metric is not None:
-                    metric_value = self._get_metric(metrics, monitor_metric)
-                    if (
-                        self.state.best_metric is None
-                        or metric_value > self.state.best_metric
-                    ):
-                        self.state.best_epoch = epoch
-                        self.state.best_metric = metric_value
-                        best_state = self._clone_model_state()
-                        epochs_without_improvement = 0
-                        print(
-                            f"Epoch {epoch}: best_{monitor_metric}={metric_value:.6f}"
+                if valid_data is not None:
+                    logging.info(
+                        f"Evaluating epoch {epoch:03d} | lr={self._format_lr()}"
+                    )
+                    metrics = self.evaluate_full_sort(
+                        valid_data,
+                        split=valid_split,
+                        batch_size=full_sort_batch_size,
+                    )
+                    logging.info(format_metrics_line("Validation", metrics))
+
+                    test_metrics = None
+                    if test_data is not None:
+                        test_metrics = self.evaluate_full_sort(
+                            test_data,
+                            split=test_split,
+                            batch_size=full_sort_batch_size,
                         )
-                    else:
-                        epochs_without_improvement += 1
+                        logging.info(format_metrics_line("Test", test_metrics))
+
+                    if monitor_metric is not None:
+                        metric_value = self._get_metric(metrics, monitor_metric)
                         if (
-                            early_stop_patience is not None
-                            and epochs_without_improvement >= int(early_stop_patience)
+                            self.state.best_metric is None
+                            or metric_value > self.state.best_metric
                         ):
-                            print(
-                                "Early stopping: "
-                                f"{monitor_metric} did not improve for "
-                                f"{early_stop_patience} epochs."
+                            self.state.best_epoch = epoch
+                            self.state.best_metric = metric_value
+                            best_state = self._clone_model_state()
+                            best_metrics = metrics
+                            best_test_metrics = test_metrics
+                            epochs_without_improvement = 0
+                            logging.info(
+                                f"New best | epoch={epoch:03d} | "
+                                f"{monitor_metric}={format_metric_value(metric_value)}"
                             )
-                            break
+                        else:
+                            epochs_without_improvement += 1
+                            logging.info(
+                                f"No improvement | "
+                                f"best_epoch={self.state.best_epoch:03d} | "
+                                f"early_stop={epochs_without_improvement}/"
+                                f"{early_stop_patience}"
+                            )
+
+                    epoch_time = time.perf_counter() - epoch_start
+                    best_metric = format_metric_value(self.state.best_metric)
+                    current_metric = (
+                        format_metric_value(self._get_metric(metrics, monitor_metric))
+                        if monitor_metric is not None
+                        else "N/A"
+                    )
+                    current_test_metric = (
+                        format_metric_value(
+                            self._get_metric(test_metrics, monitor_metric)
+                        )
+                        if monitor_metric is not None and test_metrics is not None
+                        else "N/A"
+                    )
+                    logging.info(
+                        f"Epoch {epoch:03d}/{int(num_epochs):03d} | "
+                        f"loss={train_loss:.8f} | "
+                        f"lr={self._format_lr()} | "
+                        f"val {monitor_metric}={current_metric} | "
+                        f"test {monitor_metric}={current_test_metric} | "
+                        f"best={best_metric} | "
+                        f"time={epoch_time:.2f}s"
+                    )
+
+                    if (
+                        monitor_metric is not None
+                        and early_stop_patience is not None
+                        and epochs_without_improvement >= int(early_stop_patience)
+                    ):
+                        logging.info("Early stopping triggered.")
+                        break
+                else:
+                    epoch_time = time.perf_counter() - epoch_start
+                    logging.info(
+                        f"Epoch {epoch:03d}/{int(num_epochs):03d} | "
+                        f"loss={train_loss:.8f} | "
+                        f"lr={self._format_lr()} | "
+                        f"eval=skipped | "
+                        f"time={epoch_time:.2f}s"
+                    )
 
         if test_data is not None:
             if best_state is None:
                 raise RuntimeError("No best validation model was selected.")
             self.model.load_state_dict(best_state)
-            print(
-                "Best validation model: "
-                f"epoch={self.state.best_epoch}, "
-                f"{monitor_metric}={self.state.best_metric:.6f}"
+            if best_test_metrics is None:
+                with logging_redirect_tqdm():
+                    best_test_metrics = self.evaluate_full_sort(
+                        test_data,
+                        split=test_split,
+                        batch_size=full_sort_batch_size,
+                    )
+            logging.info("=" * 50)
+            logging.info("Training finished.")
+            logging.info(f"Best Epoch: {self.state.best_epoch:03d}")
+            logging.info(format_metrics_line("Best Validation", best_metrics))
+            logging.info(
+                format_metrics_line(
+                    "Corresponding Test",
+                    best_test_metrics,
+                )
             )
-            test_metrics = self.evaluate_full_sort(
-                test_data,
-                split=test_split,
-                batch_size=full_sort_batch_size,
-            )
-            print(f"Test metrics on best validation model: {test_metrics}")
+            logging.info("=" * 50)
+        elif best_state is not None:
+            self.model.load_state_dict(best_state)
+            logging.info("=" * 50)
+            logging.info("Training finished.")
+            logging.info(f"Best Epoch: {self.state.best_epoch:03d}")
+            logging.info(format_metrics_line("Best Validation", best_metrics))
+            logging.info("=" * 50)
+        else:
+            logging.info("=" * 50)
+            logging.info("Training finished.")
+            logging.info("=" * 50)
 
         return self.state
 
@@ -106,7 +197,10 @@ class GraphTrainer:
         total_loss = 0.0
         total_batches = 0
 
-        for batch_idx, batch in enumerate(tqdm(train_loader, desc="Training"), start=1):
+        for batch_idx, batch in enumerate(
+            tqdm(train_loader, desc="Training", **TQDM_KWARGS),
+            start=1,
+        ):
             batch = self._move_batch_to_device(batch)
             self.optimizer.zero_grad()
 
@@ -173,6 +267,11 @@ class GraphTrainer:
             for name, value in self.model.state_dict().items()
         }
 
+    def _format_lr(self) -> str:
+        if not self.optimizer.param_groups:
+            return "0.00000000e+00"
+        return f"{float(self.optimizer.param_groups[0].get('lr', 0.0)):.8e}"
+
     @staticmethod
     def _get_metric(metrics: dict[str, float], metric_name: str) -> float:
         if metric_name not in metrics:
@@ -181,3 +280,53 @@ class GraphTrainer:
                 f"Monitor metric not found: {metric_name}. Available: {available}"
             )
         return float(metrics[metric_name])
+
+
+def format_metric_value(value, digits: int = 8) -> str:
+    if value is None:
+        return "N/A"
+    if isinstance(value, Real) and not isinstance(value, bool):
+        return f"{float(value):.{digits}f}"
+    return repr(value)
+
+
+def _metric_sort_key(metric: str):
+    metric_order = {
+        "Recall": 0,
+        "NDCG": 1,
+        "Precision": 2,
+        "Hit": 3,
+        "MRR": 4,
+    }
+    if "@" not in metric:
+        return (1, metric, 0, "")
+
+    name, k_text = metric.rsplit("@", 1)
+    try:
+        k_value = int(k_text)
+    except ValueError:
+        k_value = 10**9
+    return (0, k_value, metric_order.get(name, 99), name)
+
+
+def _ordered_metric_items(metrics: Mapping):
+    return sorted(metrics.items(), key=lambda item: _metric_sort_key(str(item[0])))
+
+
+def format_metrics(metrics: Mapping | None, digits: int = 8) -> str:
+    if metrics is None:
+        return "None"
+
+    return " | ".join(
+        f"{key}={format_metric_value(value, digits)}"
+        for key, value in _ordered_metric_items(metrics)
+    )
+
+
+def format_metrics_line(
+    label: str,
+    metrics: Mapping | None,
+    digits: int = 8,
+    label_width: int = 18,
+) -> str:
+    return f"{label:<{label_width}} | {format_metrics(metrics, digits)}"

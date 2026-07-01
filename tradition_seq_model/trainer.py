@@ -6,6 +6,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 
+TQDM_KWARGS = {"dynamic_ncols": True, "leave": False}
+
+
 def move_batch_to_device(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
     return {key: value.to(device) for key, value in batch.items()}
 
@@ -16,10 +19,13 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     max_grad_norm: Optional[float] = None,
-) -> float:
+) -> Dict[str, float]:
     model.train()
     total_loss = 0.0
-    for batch in tqdm(train_loader, desc="Training"):
+    total_positive_loss = 0.0
+    total_negative_loss = 0.0
+    progress = tqdm(train_loader, desc="Training", **TQDM_KWARGS)
+    for step, batch in enumerate(progress, start=1):
         batch = move_batch_to_device(batch, device)
         optimizer.zero_grad()
         outputs = model(batch)
@@ -28,8 +34,26 @@ def train_one_epoch(
         if max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
-        total_loss += loss.item()
-    return total_loss / max(len(train_loader), 1)
+
+        loss_value = float(loss.detach().item())
+        positive_loss_value = float(outputs.get("positive_loss", loss.detach()).detach().item())
+        negative_loss_value = float(outputs.get("negative_loss", loss.detach()).detach().item())
+        total_loss += loss_value
+        total_positive_loss += positive_loss_value
+        total_negative_loss += negative_loss_value
+        progress.set_postfix(
+            loss=f"{loss_value:.4f}",
+            avg=f"{total_loss / step:.4f}",
+            pos=f"{positive_loss_value:.4f}",
+            neg=f"{negative_loss_value:.4f}",
+        )
+
+    num_batches = max(len(train_loader), 1)
+    return {
+        "loss": total_loss / num_batches,
+        "positive_loss": total_positive_loss / num_batches,
+        "negative_loss": total_negative_loss / num_batches,
+    }
 
 
 def evaluate(
@@ -43,7 +67,7 @@ def evaluate(
     total_count = 0.0
 
     with torch.no_grad():
-        for batch in tqdm(eval_loader, desc="Evaluating"):
+        for batch in tqdm(eval_loader, desc="Evaluating", **TQDM_KWARGS):
             batch = move_batch_to_device(batch, device)
             batch_metrics = model.evaluate_step(batch=batch, topk_list=topk_list)
             count = float(batch_metrics.pop("count", 0.0))

@@ -8,11 +8,10 @@ from transformers.generation.logits_process import LogitsProcessor
 
 class TIGERLogitsProcessor(LogitsProcessor):
     """
-    Masks generation scores so every beam follows a legal item code path.
+    在生成时屏蔽非法 token，保证每个 beam 都沿着合法 item code 路径前进。
 
-    The processor follows the same integration style as NonameUntitled/tiger:
-    generation still runs with HuggingFace beam search, but invalid next-token
-    scores are set to -inf at every decoding step.
+    这里仍然使用 HuggingFace 的 beam search，只是在每个解码步把非法
+    next-token 的 score 置为 -inf。
     """
 
     def __init__(self, item_to_code_map: Dict[int, Sequence[int]], config: Dict):

@@ -1,4 +1,5 @@
 dataset: Beauty
+data_format: sequence_autoregressive
 
 paths:
   dataset_root: ../datasets/{dataset_name}

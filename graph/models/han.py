@@ -6,8 +6,10 @@ import torch.nn.functional as F
 from torch import nn
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import HANConv, Linear
+from tqdm import tqdm
 
 EdgeType = Tuple[str, str, str]
+TQDM_KWARGS = {"dynamic_ncols": True, "leave": False}
 
 
 class HANEncoder(nn.Module):
@@ -176,7 +178,11 @@ class HANLinkPredictor(nn.Module):
             totals[f"Recall@{k}"] = 0.0
             totals[f"NDCG@{k}"] = 0.0
 
-        for start in range(0, num_targets, int(batch_size)):
+        for start in tqdm(
+            range(0, num_targets, int(batch_size)),
+            desc="Evaluating",
+            **TQDM_KWARGS,
+        ):
             end = min(start + int(batch_size), num_targets)
             users = target_edge_index[0, start:end]
             target_items = target_edge_index[1, start:end]

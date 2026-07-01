@@ -1,9 +1,5 @@
 # 文件路径: configs/TIGER.yaml
 
-# 用户条件 (对齐 NonameUntitled/tiger): user id 哈希到 user_ids_count 个桶,
-# 作为一个 token 追加到 encoder 输入序列末尾。设为 0 或删除则关闭。
-user_ids_count: 2000
-
 # TIGER 模型独有的架构参数
 model_params:
   max_len: 20

@@ -18,19 +18,20 @@ class SASRec(nn.Module):
         self.num_items = int(num_items)
         self.max_len = int(model_params["max_len"])
         self.hidden_size = int(model_params["hidden_size"])
+        self.num_attention_heads = int(model_params["num_attention_heads"])
         self.initializer_range = float(model_params.get("initializer_range", 0.02))
 
         self.item_embeddings = nn.Embedding(self.num_items + 1, self.hidden_size, padding_idx=0)
-        self.position_embeddings = nn.Embedding(self.max_len, self.hidden_size)
+        self.position_embeddings = nn.Embedding(self.max_len + 1, self.hidden_size, padding_idx=0)
         self.layer_norm = nn.LayerNorm(self.hidden_size, eps=1e-12)
         self.dropout = nn.Dropout(float(model_params.get("hidden_dropout_prob", 0.0)))
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.hidden_size,
-            nhead=int(model_params["num_attention_heads"]),
+            nhead=self.num_attention_heads,
             dim_feedforward=int(model_params.get("intermediate_size", self.hidden_size * 4)),
             dropout=float(model_params.get("attention_probs_dropout_prob", 0.0)),
-            activation="gelu",
+            activation="relu",
             batch_first=True,
             norm_first=False,
         )
@@ -42,6 +43,7 @@ class SASRec(nn.Module):
         self.apply(self._init_weights)
         with torch.no_grad():
             self.item_embeddings.weight[0].fill_(0)
+            self.position_embeddings.weight[0].fill_(0)
 
     @property
     def n_parameters(self) -> str:
@@ -60,61 +62,125 @@ class SASRec(nn.Module):
     def _causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         return torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=1)
 
+    def _attention_mask(self, attention_mask: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len = attention_mask.shape
+        causal_mask = self._causal_mask(seq_len, attention_mask.device)
+        causal_mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
+
+        valid_query_mask = attention_mask.bool().unsqueeze(2)
+        key_padding_mask = (attention_mask == 0).unsqueeze(1)
+        combined_mask = causal_mask | (valid_query_mask & key_padding_mask)
+
+        combined_mask = combined_mask.unsqueeze(1).expand(
+            batch_size,
+            self.num_attention_heads,
+            seq_len,
+            seq_len,
+        )
+        return combined_mask.reshape(batch_size * self.num_attention_heads, seq_len, seq_len)
+
     def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape
-        position_ids = torch.arange(seq_len, dtype=torch.long, device=input_ids.device)
+        position_ids = torch.arange(1, seq_len + 1, dtype=torch.long, device=input_ids.device)
         position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+        position_ids = position_ids.masked_fill(attention_mask == 0, 0)
 
         hidden_states = self.item_embeddings(input_ids) + self.position_embeddings(position_ids)
+        hidden_states = hidden_states * attention_mask.unsqueeze(-1)
         hidden_states = self.layer_norm(hidden_states)
         hidden_states = self.dropout(hidden_states)
 
-        key_padding_mask = attention_mask == 0
-        return self.encoder(
+        sequence_output = self.encoder(
             hidden_states,
-            mask=self._causal_mask(seq_len, input_ids.device),
-            src_key_padding_mask=key_padding_mask,
+            mask=self._attention_mask(attention_mask),
         )
+        return sequence_output.masked_fill(attention_mask.unsqueeze(-1) == 0, 0.0)
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
         labels_seq = batch["labels_seq"]
+        negative_labels_seq = batch["negative_labels_seq"]
 
         sequence_output = self.encode(input_ids, attention_mask)
         valid_mask = labels_seq != -100
         if not torch.any(valid_mask):
-            return {"loss": torch.tensor(0.0, device=input_ids.device, requires_grad=True)}
+            zero_loss = torch.tensor(0.0, device=input_ids.device, requires_grad=True)
+            return {
+                "loss": zero_loss,
+                "positive_loss": zero_loss.detach(),
+                "negative_loss": zero_loss.detach(),
+            }
 
-        return {"loss": self._ce_loss(sequence_output, labels_seq, valid_mask)}
+        positive_loss, negative_loss = self._bce_loss(
+            sequence_output,
+            labels_seq,
+            negative_labels_seq,
+            valid_mask,
+        )
+        return {
+            "loss": positive_loss + negative_loss,
+            "positive_loss": positive_loss.detach(),
+            "negative_loss": negative_loss.detach(),
+        }
 
-    def _ce_loss(
+    def _bce_loss(
         self,
         sequence_output: torch.Tensor,
         labels_seq: torch.Tensor,
+        negative_labels_seq: torch.Tensor,
         valid_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        # Full-vocabulary softmax over all items (RecBole-style CE).
-        # Logits column j corresponds to embedding index j == original_item_id + 1.
-        logits = torch.matmul(sequence_output, self.item_embeddings.weight.transpose(0, 1))
-        target_ids = torch.where(valid_mask, labels_seq + 1, torch.full_like(labels_seq, -100))
-        return F.cross_entropy(
-            logits[valid_mask],
-            target_ids[valid_mask],
-            ignore_index=-100,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states = sequence_output[valid_mask]
+        positive_item_ids = labels_seq[valid_mask] + 1
+        negative_item_ids = negative_labels_seq[valid_mask] + 1
+
+        positive_embeddings = self.item_embeddings(positive_item_ids)
+        negative_embeddings = self.item_embeddings(negative_item_ids)
+        positive_logits = (hidden_states * positive_embeddings).sum(dim=-1)
+        negative_logits = (hidden_states * negative_embeddings).sum(dim=-1)
+
+        positive_loss = F.binary_cross_entropy_with_logits(
+            positive_logits,
+            torch.ones_like(positive_logits),
         )
+        negative_loss = F.binary_cross_entropy_with_logits(
+            negative_logits,
+            torch.zeros_like(negative_logits),
+        )
+        return positive_loss, negative_loss
 
     def _last_hidden_state(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
         sequence_output = self.encode(batch["input_ids"], batch["attention_mask"])
-        seq_lens = torch.clamp(batch["attention_mask"].sum(dim=1) - 1, min=0)
-        return sequence_output[torch.arange(sequence_output.shape[0], device=sequence_output.device), seq_lens]
+        return sequence_output[:, -1]
+
+    def _mask_seen_scores(
+        self,
+        scores: torch.Tensor,
+        batch: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        filter_item_ids = batch.get("filter_item_ids")
+        if filter_item_ids is None or filter_item_ids.numel() == 0:
+            return scores
+
+        valid_filter = (filter_item_ids >= 0) & (filter_item_ids < scores.shape[1])
+        target_ids = batch.get("target_ids")
+        if target_ids is not None:
+            valid_filter = valid_filter & (filter_item_ids != target_ids.unsqueeze(1))
+        if not torch.any(valid_filter):
+            return scores
+
+        row_indices = torch.arange(scores.shape[0], device=scores.device).unsqueeze(1)
+        row_indices = row_indices.expand_as(filter_item_ids)
+        scores[row_indices[valid_filter], filter_item_ids[valid_filter]] = torch.finfo(scores.dtype).min
+        return scores
 
     def generate_ranklist(self, batch: Dict[str, torch.Tensor], topk: int) -> torch.Tensor:
         final_state = self._last_hidden_state(batch)
         item_emb = self.item_embeddings.weight[1:]
         scores = torch.matmul(final_state, item_emb.transpose(0, 1))
+        scores = self._mask_seen_scores(scores, batch)
 
-        # Full-sort over all items WITHOUT filtering history (aligns with RPG's eval).
         k = min(topk, scores.shape[1])
         _, topk_indices = torch.topk(scores, k=k, dim=1)
         return topk_indices

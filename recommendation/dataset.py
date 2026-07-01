@@ -8,12 +8,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from data_split import (
+from common.data_split import (
     build_eval_samples,
     build_prefix_train_samples,
     build_sequence_window_train_examples,
     split_from_interactions,
 )
+
+PREFIX_TARGET = "prefix_target"
+SEQUENCE_AUTOREGRESSIVE = "sequence_autoregressive"
+SUPPORTED_DATA_FORMATS = {PREFIX_TARGET, SEQUENCE_AUTOREGRESSIVE}
 
 
 def truncate_sequence(sequence, max_len):
@@ -48,7 +52,7 @@ def item2code(code_path, vocab_sizes, bases):
     return item_to_code, code_to_item
 
 
-def _build_generative_data(split_data, mode, max_len):
+def _build_prefix_target_data(split_data, mode, max_len):
     if mode == "train":
         samples = build_prefix_train_samples(
             split_data.train_sequences,
@@ -74,7 +78,7 @@ def _build_generative_data(split_data, mode, max_len):
     ]
 
 
-def _build_rpg_data(split_data, mode, max_len):
+def _build_sequence_autoregressive_data(split_data, mode, max_len):
     if mode == "train":
         return build_sequence_window_train_examples(
             split_data.train_sequences,
@@ -100,6 +104,12 @@ class GenRecDataset(Dataset):
         self.config = config
         self.mode = mode
         self.model_name = self.config["model_name"].upper()
+        self.data_format = str(self.config.get("data_format", PREFIX_TARGET)).lower()
+        if self.data_format not in SUPPORTED_DATA_FORMATS:
+            raise ValueError(
+                f"Unsupported data_format: {self.data_format}. "
+                f"Supported values: {sorted(SUPPORTED_DATA_FORMATS)}"
+            )
         self.max_len = self.config["model_params"]["max_len"]
         self.dataset_path = self.config["inter_json"]
         if not Path(self.dataset_path).is_file():
@@ -111,17 +121,17 @@ class GenRecDataset(Dataset):
             max_history_len=self.max_len,
         )
 
-        if self.model_name == "RPG":
-            self.data = _build_rpg_data(split_data, mode, self.max_len)
+        if self.data_format == SEQUENCE_AUTOREGRESSIVE:
+            self.data = _build_sequence_autoregressive_data(split_data, mode, self.max_len)
             for item in self.data:
                 item["mode"] = mode
-        else:
-            self.data = _build_generative_data(split_data, mode, self.max_len)
+        elif self.data_format == PREFIX_TARGET:
+            self.data = _build_prefix_target_data(split_data, mode, self.max_len)
 
         if not self.data:
             raise ValueError(
                 f"No {mode} samples were built from {self.dataset_path} "
-                f"for model {self.model_name}."
+                f"for model {self.model_name} with data_format={self.data_format}."
             )
 
     def __len__(self):

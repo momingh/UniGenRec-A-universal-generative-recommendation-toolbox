@@ -1,6 +1,8 @@
 import argparse
 import logging
 import pprint
+import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -11,14 +13,26 @@ from dataset import (
     SASRecEvalDataset,
     SASRecTrainCollator,
     SASRecTrainDataset,
-    expand_train_sequences,
+    SEQUENCE_AUTOREGRESSIVE,
     infer_num_items,
-    load_eval_examples,
-    restore_train_sequences,
+    load_sasrec_examples,
 )
 from models import SASRec
 from trainer import evaluate, train_one_epoch
-from utils import ensure_dir, load_config, resolve_path, set_seed, setup_logging
+from utils import (
+    ensure_dir,
+    format_metric_value,
+    format_metrics_line,
+    load_config,
+    resolve_path,
+    set_seed,
+    setup_logging,
+)
+
+try:
+    from tqdm.contrib.logging import logging_redirect_tqdm
+except ImportError:
+    logging_redirect_tqdm = nullcontext
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,16 +52,15 @@ def build_dataloaders(config, dataset_dir: Path, dataset_name: str, num_items: i
     training_params = config["training_params"]
     evaluation_params = config["evaluation_params"]
     max_len = int(model_params["max_len"])
+    data_format = str(config.get("data_format", SEQUENCE_AUTOREGRESSIVE)).lower()
 
-    train_json = dataset_dir / f"{dataset_name}.train.jsonl"
-    valid_json = dataset_dir / f"{dataset_name}.valid.jsonl"
-    test_json = dataset_dir / f"{dataset_name}.test.jsonl"
+    inter_json = dataset_dir / f"{dataset_name}.inter.json"
 
-    logging.info("Restoring train sequences from %s", train_json)
-    user_sequences, seen_items_by_user = restore_train_sequences(train_json)
-    train_examples = expand_train_sequences(user_sequences, max_len=max_len)
-    valid_examples = load_eval_examples(valid_json, max_len=max_len)
-    test_examples = load_eval_examples(test_json, max_len=max_len)
+    logging.info("Creating Datasets...")
+    logging.info("Loading SASRec data from %s with data_format=%s", inter_json, data_format)
+    train_examples, valid_examples, test_examples, seen_items_by_user = (
+        load_sasrec_examples(inter_json, max_len=max_len, data_format=data_format)
+    )
 
     logging.info(
         "Loaded data: users=%d, train_examples=%d, valid_examples=%d, test_examples=%d",
@@ -60,6 +73,7 @@ def build_dataloaders(config, dataset_dir: Path, dataset_name: str, num_items: i
     train_workers = int(training_params.get("num_workers", 0) or 0)
     eval_workers = int(evaluation_params.get("num_workers", train_workers) or 0)
 
+    logging.info("Creating DataLoaders...")
     train_loader = DataLoader(
         SASRecTrainDataset(train_examples),
         batch_size=int(training_params["batch_size"]),
@@ -88,6 +102,16 @@ def build_dataloaders(config, dataset_dir: Path, dataset_name: str, num_items: i
         persistent_workers=eval_workers > 0,
     )
     return train_loader, valid_loader, test_loader, seen_items_by_user
+
+
+def get_current_lr(optimizer: torch.optim.Optimizer) -> float:
+    if not optimizer.param_groups:
+        return 0.0
+    return float(optimizer.param_groups[0].get("lr", 0.0))
+
+
+def format_lr(optimizer: torch.optim.Optimizer) -> str:
+    return f"{get_current_lr(optimizer):.8e}"
 
 
 def main() -> None:
@@ -121,10 +145,13 @@ def main() -> None:
 
     setup_logging(log_path)
     set_seed(int(config["training_params"].get("seed", 2023)))
-    logging.info("Configuration:\n%s", pprint.pformat(config))
+    logging.info("Configuration loaded for SASRec on %s.", dataset_name)
+    logging.info("=" * 50)
+    logging.info("\n%s", pprint.pformat(config))
+    logging.info("=" * 50)
     logging.info("Dataset directory: %s", dataset_dir)
     logging.info("Output directory: %s", output_root)
-    logging.info("Full-sort evaluation over all items WITHOUT filtering seen items.")
+    logging.info("Full-sort evaluation with seen-history items filtered.")
 
     device_name = config["training_params"].get("device", "cuda:0")
     device = torch.device(device_name if torch.cuda.is_available() else "cpu")
@@ -143,9 +170,15 @@ def main() -> None:
     model = SASRec(config=config, num_items=num_items)
     model.to(device)
     logging.info(model.n_parameters)
+    logging.info("=" * 50)
 
     topk_list = [int(k) for k in config["evaluation_params"]["topk_list"]]
     checkpoint_path = args.checkpoint or save_path
+
+    def run_eval(label, loader):
+        results = evaluate(model, loader, topk_list, device)
+        logging.info(format_metrics_line(label, results))
+        return results
 
     if args.eval_only:
         if not checkpoint_path.exists():
@@ -153,8 +186,7 @@ def main() -> None:
         state_dict = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(state_dict)
         logging.info("[Eval-Only] Loaded checkpoint from %s", checkpoint_path)
-        test_results = evaluate(model, test_loader, topk_list, device)
-        logging.info("[Eval-Only] Test Results: %s", test_results)
+        run_eval("[Eval-Only] Test", test_loader)
         return
 
     optimizer = torch.optim.Adam(
@@ -168,7 +200,7 @@ def main() -> None:
         max_grad_norm = float(max_grad_norm)
         logging.info("Gradient clipping enabled: max_grad_norm=%s", max_grad_norm)
 
-    best_ndcg = -1.0
+    best_ndcg = 0.0
     best_epoch = 0
     best_val_results = None
     best_test_results = None
@@ -176,57 +208,107 @@ def main() -> None:
     eval_interval = int(config["training_params"].get("eval_interval", 1))
     early_stop = int(config["training_params"].get("early_stop", 10))
     num_epochs = int(config["training_params"]["num_epochs"])
+    best_metric_name = "NDCG@10"
+    fallback_best_metric_name = f"NDCG@{topk_list[-1]}"
+    early_stop_limit = early_stop * eval_interval
+    epoch_separator = "-" * 80
 
-    for epoch in range(1, num_epochs + 1):
-        logging.info("--- Epoch %d/%d ---", epoch, num_epochs)
-        train_loss = train_one_epoch(
-            model=model,
-            train_loader=train_loader,
-            optimizer=optimizer,
-            device=device,
-            max_grad_norm=max_grad_norm,
-        )
-        logging.info("Training loss: %.6f", train_loss)
+    logging.info("Evaluation interval set to: %d epoch(s)", eval_interval)
 
-        if epoch % eval_interval != 0:
-            continue
+    with logging_redirect_tqdm():
+        for epoch in range(1, num_epochs + 1):
+            epoch_start = time.perf_counter()
+            logging.info(epoch_separator)
+            logging.info("Epoch %03d/%03d started | lr=%s", epoch, num_epochs, format_lr(optimizer))
 
-        val_results = evaluate(model, valid_loader, topk_list, device)
-        logging.info("Validation Results: %s", val_results)
-        current_ndcg = val_results.get("NDCG@10", val_results.get(f"NDCG@{topk_list[-1]}", 0.0))
-
-        if current_ndcg > best_ndcg:
-            best_ndcg = current_ndcg
-            best_epoch = epoch
-            best_val_results = val_results
-            early_stop_counter = 0
-
-            test_results = evaluate(model, test_loader, topk_list, device)
-            best_test_results = test_results
-            logging.info("Test Results: %s", test_results)
-
-            torch.save(model.state_dict(), save_path)
-            logging.info("Best model saved to %s", save_path)
-        else:
-            early_stop_counter += 1
-            logging.info(
-                "No improvement since epoch %d. Early stop counter: %d/%d",
-                best_epoch,
-                early_stop_counter,
-                early_stop,
+            train_metrics = train_one_epoch(
+                model=model,
+                train_loader=train_loader,
+                optimizer=optimizer,
+                device=device,
+                max_grad_norm=max_grad_norm,
             )
-            if early_stop_counter >= early_stop:
-                logging.info("Early stopping triggered.")
-                break
+            train_loss = train_metrics["loss"]
+
+            if epoch % eval_interval == 0:
+                logging.info("Evaluating epoch %03d | lr=%s", epoch, format_lr(optimizer))
+                val_results = run_eval("Validation", valid_loader)
+                current_ndcg = val_results.get(
+                    best_metric_name,
+                    val_results.get(fallback_best_metric_name, 0.0),
+                )
+
+                if current_ndcg > best_ndcg:
+                    best_ndcg = current_ndcg
+                    best_epoch = epoch
+                    best_val_results = val_results
+                    early_stop_counter = 0
+
+                    best_test_results = run_eval("Test", test_loader)
+
+                    torch.save(model.state_dict(), save_path)
+                    logging.info(
+                        "New best | epoch=%03d | %s=%s | saved=%s",
+                        epoch,
+                        best_metric_name,
+                        format_metric_value(best_ndcg),
+                        save_path,
+                    )
+                else:
+                    early_stop_counter += eval_interval
+                    logging.info(
+                        "No improvement | best_epoch=%03d | early_stop=%d/%d",
+                        best_epoch,
+                        early_stop_counter,
+                        early_stop_limit,
+                    )
+
+                epoch_time = time.perf_counter() - epoch_start
+                logging.info(
+                    (
+                        "Epoch %03d/%03d | loss=%.8f | loss_pos=%.8f | loss_neg=%.8f "
+                        "| lr=%s | val %s=%s | best=%s | time=%.2fs"
+                    ),
+                    epoch,
+                    num_epochs,
+                    train_loss,
+                    train_metrics["positive_loss"],
+                    train_metrics["negative_loss"],
+                    format_lr(optimizer),
+                    best_metric_name,
+                    format_metric_value(current_ndcg),
+                    format_metric_value(best_ndcg),
+                    epoch_time,
+                )
+
+                if early_stop_counter >= early_stop_limit:
+                    logging.info("Early stopping triggered.")
+                    break
+            else:
+                epoch_time = time.perf_counter() - epoch_start
+                logging.info(
+                    (
+                        "Epoch %03d/%03d | loss=%.8f | loss_pos=%.8f | loss_neg=%.8f "
+                        "| lr=%s | eval=skipped | best=%s | time=%.2fs"
+                    ),
+                    epoch,
+                    num_epochs,
+                    train_loss,
+                    train_metrics["positive_loss"],
+                    train_metrics["negative_loss"],
+                    format_lr(optimizer),
+                    format_metric_value(best_ndcg),
+                    epoch_time,
+                )
 
     logging.info("=" * 50)
     logging.info("Training finished.")
     if best_test_results is not None:
-        logging.info("Best epoch: %d", best_epoch)
-        logging.info("Best validation results: %s", best_val_results)
-        logging.info("Corresponding test results: %s", best_test_results)
+        logging.info("Best Epoch: %03d", best_epoch)
+        logging.info(format_metrics_line("Best Validation", best_val_results))
+        logging.info(format_metrics_line("Corresponding Test", best_test_results))
     else:
-        logging.info("No validation improvement was observed.")
+        logging.info("No improvement was observed.")
     logging.info("=" * 50)
 
 

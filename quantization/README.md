@@ -14,8 +14,16 @@ cd /at2-data/mominghao/gen_rec/UniGenRec-A-universal-generative-recommendation-t
 python main.py \
   --model_name qinco \
   --dataset_name Beauty \
-  --embedding_model text-embedding-3-large-pca512
+  --embedding_source graph \
+  --graph_model lightgcn
 ```
+
+
+python main.py \
+  --model_name rqvae \
+  --dataset_name Beauty \
+  --embedding_source graph \
+  --graph_model lightgcn
 
 示例：
 

@@ -1,104 +1,119 @@
 import json
+import random
+import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import torch
 from torch.utils.data import Dataset
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-def load_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                yield json.loads(line)
+from common.data_split import (
+    build_prefix_train_samples,
+    build_sequence_window_train_examples,
+    split_from_interactions,
+)
+
+PREFIX_TARGET = "prefix_target"
+SEQUENCE_AUTOREGRESSIVE = "sequence_autoregressive"
+SUPPORTED_DATA_FORMATS = {PREFIX_TARGET, SEQUENCE_AUTOREGRESSIVE}
 
 
-def _to_int_list(values: Iterable[Any]) -> List[int]:
-    return [int(value) for value in values]
+def _normalize_data_format(data_format: str) -> str:
+    normalized = str(data_format).lower()
+    if normalized not in SUPPORTED_DATA_FORMATS:
+        raise ValueError(
+            f"Unsupported data_format: {normalized}. "
+            f"Supported values: {sorted(SUPPORTED_DATA_FORMATS)}"
+        )
+    return normalized
 
 
-def restore_train_sequences(train_json: Path) -> Tuple[List[Tuple[int, List[int]]], Dict[int, List[int]]]:
-    user_to_seq: Dict[int, List[int]] = {}
-    user_order: List[int] = []
-    userless_sequences: List[Tuple[int, List[int]]] = []
-    next_userless_id = -1
+def _build_eval_examples(samples, max_len: int) -> List[Dict[str, Any]]:
+    return [
+        {
+            "history": [int(item) for item in sample.history[-max_len:]],
+            "filter_items": [int(item) for item in sample.history],
+            "target": int(sample.target),
+        }
+        for sample in samples
+        if len(sample.history) > 0
+    ]
 
-    for obj in load_jsonl(train_json):
-        history = _to_int_list(obj.get("history", []))
-        target = int(obj["target"])
-        item_seq = history + [target]
+
+def _build_sequence_autoregressive_train_examples(split_data, max_len: int) -> List[Dict[str, Any]]:
+    train_examples: List[Dict[str, Any]] = []
+    for user_sequence in split_data.train_sequences:
+        item_seq = [int(item) for item in user_sequence.items]
+        for example in build_sequence_window_train_examples([user_sequence], max_len=max_len):
+            example["exclude_items"] = item_seq
+            train_examples.append(example)
+    return train_examples
+
+
+def _build_prefix_target_train_examples(split_data, max_len: int) -> List[Dict[str, Any]]:
+    user_train_items = {
+        int(user_sequence.user): [int(item) for item in user_sequence.items]
+        for user_sequence in split_data.train_sequences
+    }
+    train_examples: List[Dict[str, Any]] = []
+
+    for sample in build_prefix_train_samples(split_data.train_sequences, max_history_len=max_len):
+        history = [int(item) for item in sample.get("history", [])]
+        target = int(sample["target"])
+        item_seq = [*history, target]
         if len(item_seq) < 2:
             continue
 
-        raw_user = obj.get("user")
-        if raw_user is None:
-            userless_sequences.append((next_userless_id, item_seq))
-            next_userless_id -= 1
-            continue
-
-        user = int(raw_user)
-        if user not in user_to_seq:
-            user_to_seq[user] = item_seq
-            user_order.append(user)
-            continue
-
-        expected_history = user_to_seq[user][-len(history):] if history else []
-        if expected_history != history:
-            raise ValueError(
-                f"Train records for user {user} are not in prefix order; "
-                "cannot restore the full sequence from train.jsonl."
-            )
-        user_to_seq[user].append(target)
-
-    ordered_sequences = [(user, user_to_seq[user]) for user in user_order]
-    ordered_sequences.extend(userless_sequences)
-    seen_items = {user: sorted(set(seq)) for user, seq in ordered_sequences if user >= 0}
-    return ordered_sequences, seen_items
+        raw_user = sample.get("user")
+        exclude_items = item_seq
+        if raw_user is not None:
+            exclude_items = user_train_items.get(int(raw_user), item_seq)
+        train_examples.append(
+            {
+                "item_seq": item_seq,
+                "exclude_items": exclude_items,
+                "label_all_positions": False,
+            }
+        )
+    return train_examples
 
 
-def expand_train_sequences(
-    user_sequences: List[Tuple[int, List[int]]],
+def load_sasrec_examples(
+    inter_json: Path,
     max_len: int,
-) -> List[Dict[str, Any]]:
-    examples: List[Dict[str, Any]] = []
-    for _user, item_seq in user_sequences:
-        if len(item_seq) < 2:
-            continue
+    data_format: str = SEQUENCE_AUTOREGRESSIVE,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Dict[int, List[int]]]:
+    data_format = _normalize_data_format(data_format)
+    split_data = split_from_interactions(
+        inter_json,
+        min_sequence_len=3,
+        max_history_len=None,
+    )
 
-        n_return_examples = max(len(item_seq) - max_len, 1)
-        first_window = item_seq[: min(len(item_seq), max_len + 1)]
-        examples.append(
-            {
-                "item_seq": first_window,
-                "label_all_positions": True,
-            }
-        )
+    if data_format == SEQUENCE_AUTOREGRESSIVE:
+        train_examples = _build_sequence_autoregressive_train_examples(split_data, max_len)
+    else:
+        train_examples = _build_prefix_target_train_examples(split_data, max_len)
 
-        for start in range(1, n_return_examples):
-            window = item_seq[start : start + max_len + 1]
-            examples.append(
-                {
-                    "item_seq": window,
-                    "label_all_positions": False,
-                }
-            )
-    return examples
+    valid_examples = _build_eval_examples(split_data.valid_samples, max_len)
+    test_examples = _build_eval_examples(split_data.test_samples, max_len)
+
+    return train_examples, valid_examples, test_examples, split_data.seen_items_by_user
 
 
-def load_eval_examples(eval_json: Path, max_len: int) -> List[Dict[str, Any]]:
-    examples: List[Dict[str, Any]] = []
-    for obj in load_jsonl(eval_json):
-        history = _to_int_list(obj.get("history", []))
-        if not history:
-            continue
-        examples.append(
-            {
-                "history": history[-max_len:],
-                "target": int(obj["target"]),
-            }
-        )
-    return examples
+def load_sequence_autoregressive_examples(
+    inter_json: Path,
+    max_len: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], Dict[int, List[int]]]:
+    return load_sasrec_examples(
+        inter_json=inter_json,
+        max_len=max_len,
+        data_format=SEQUENCE_AUTOREGRESSIVE,
+    )
 
 
 def infer_num_items(dataset_dir: Path, dataset_name: str) -> int:
@@ -109,14 +124,19 @@ def infer_num_items(dataset_dir: Path, dataset_name: str) -> int:
             item_count = sum(1 for line in f if line.strip())
 
     max_item_id = -1
-    for split in ("train", "valid", "test"):
-        json_path = dataset_dir / f"{dataset_name}.{split}.jsonl"
-        if not json_path.exists():
-            continue
-        for obj in load_jsonl(json_path):
-            for item_id in obj.get("history", []):
-                max_item_id = max(max_item_id, int(item_id))
-            max_item_id = max(max_item_id, int(obj["target"]))
+    inter_json_path = dataset_dir / f"{dataset_name}.inter.json"
+    if inter_json_path.exists():
+        with inter_json_path.open("r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+        for raw_interactions in raw_data.values():
+            for raw_interaction in raw_interactions:
+                if isinstance(raw_interaction, dict):
+                    item_id = int(raw_interaction["item"])
+                elif isinstance(raw_interaction, (list, tuple)):
+                    item_id = int(raw_interaction[0])
+                else:
+                    item_id = int(raw_interaction)
+                max_item_id = max(max_item_id, item_id)
 
     return max(item_count, max_item_id + 1)
 
@@ -148,7 +168,23 @@ class SASRecTrainCollator:
         self.max_len = max_len
         self.num_items = num_items
 
-    def _build_example(self, item_seq: List[int], label_all_positions: bool) -> Dict[str, List[int]]:
+    def _sample_negative(self, excluded_items: set[int]) -> int:
+        if self.num_items <= 0:
+            raise ValueError("num_items must be positive for negative sampling.")
+        if len(excluded_items) >= self.num_items:
+            return random.randrange(self.num_items)
+
+        sampled_item = random.randrange(self.num_items)
+        while sampled_item in excluded_items:
+            sampled_item = random.randrange(self.num_items)
+        return sampled_item
+
+    def _build_example(
+        self,
+        item_seq: List[int],
+        exclude_items: List[int],
+        label_all_positions: bool,
+    ) -> Dict[str, List[int]]:
         input_items = item_seq[:-1]
         target_items = item_seq[1:]
         seq_len = len(input_items)
@@ -157,36 +193,47 @@ class SASRecTrainCollator:
 
         pad_len = self.max_len - seq_len
         labels = [-100] * self.max_len
+        negative_labels = [-100] * self.max_len
+        excluded_item_set = set(exclude_items)
         if label_all_positions:
-            labels[:seq_len] = target_items
+            labels[pad_len:] = target_items
+            for index in range(seq_len):
+                negative_labels[pad_len + index] = self._sample_negative(excluded_item_set)
         elif seq_len > 0:
-            labels[seq_len - 1] = item_seq[-1]
+            label_index = pad_len + seq_len - 1
+            labels[label_index] = item_seq[-1]
+            negative_labels[label_index] = self._sample_negative(excluded_item_set)
 
         return {
-            "input_ids": [item_id + 1 for item_id in input_items] + [0] * pad_len,
-            "attention_mask": [1] * seq_len + [0] * pad_len,
+            "input_ids": [0] * pad_len + [item_id + 1 for item_id in input_items],
+            "attention_mask": [0] * pad_len + [1] * seq_len,
             "labels_seq": labels,
+            "negative_labels_seq": negative_labels,
         }
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         input_ids: List[List[int]] = []
         attention_mask: List[List[int]] = []
         labels_seq: List[List[int]] = []
+        negative_labels_seq: List[List[int]] = []
 
         for item in batch:
             built = self._build_example(
                 [int(x) for x in item["item_seq"]],
+                [int(x) for x in item.get("exclude_items", item["item_seq"])],
                 bool(item["label_all_positions"]),
             )
 
             input_ids.append(built["input_ids"])
             attention_mask.append(built["attention_mask"])
             labels_seq.append(built["labels_seq"])
+            negative_labels_seq.append(built["negative_labels_seq"])
 
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "labels_seq": torch.tensor(labels_seq, dtype=torch.long),
+            "negative_labels_seq": torch.tensor(negative_labels_seq, dtype=torch.long),
         }
 
 
@@ -198,17 +245,26 @@ class SASRecEvalCollator:
         input_ids: List[List[int]] = []
         attention_mask: List[List[int]] = []
         target_ids: List[int] = []
+        filter_items: List[List[int]] = []
 
         for item in batch:
             history = [int(x) for x in item["history"]][-self.max_len:]
             seq_len = len(history)
             pad_len = self.max_len - seq_len
             target_ids.append(int(item["target"]))
-            input_ids.append([item_id + 1 for item_id in history] + [0] * pad_len)
-            attention_mask.append([1] * seq_len + [0] * pad_len)
+            input_ids.append([0] * pad_len + [item_id + 1 for item_id in history])
+            attention_mask.append([0] * pad_len + [1] * seq_len)
+            filter_items.append([int(x) for x in item.get("filter_items", history)])
+
+        max_filter_len = max((len(items) for items in filter_items), default=0)
+        padded_filter_items = [
+            items + [-1] * (max_filter_len - len(items))
+            for items in filter_items
+        ]
 
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "target_ids": torch.tensor(target_ids, dtype=torch.long),
+            "filter_item_ids": torch.tensor(padded_filter_items, dtype=torch.long),
         }

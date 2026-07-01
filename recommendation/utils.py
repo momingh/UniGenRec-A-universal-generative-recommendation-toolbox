@@ -226,21 +226,6 @@ def load_and_process_config(model_name: str, dataset_name: str, quant_method: st
     eos_id = base_vocab + 4  # 保留 EOS
     vocab_size = eos_id + 1  # ID 范圍 0..eos_id
 
-    # === 6.1 (可选) 用户 Token 区间 (对齐 NonameUntitled/tiger) ===
-    # 在词表尾部、特殊 token 之后再划出 user_ids_count 个槽位给 user token。
-    # user id 经哈希取模落入 0..user_ids_count-1，再加 user_token_base 偏移成最终 token id。
-    # 仅当 config 顶层声明了 user_ids_count(且 > 0) 时启用；GPT2/RPG 等不声明则不受影响。
-    user_ids_count = int(config.get('user_ids_count', 0) or 0)
-    if user_ids_count > 0:
-        user_token_base = vocab_size  # 紧接在 eos_id 之后
-        vocab_size = user_token_base + user_ids_count
-        config['user_ids_count'] = user_ids_count
-        config['user_token_base'] = user_token_base
-        logging.info(
-            f"[Config] 启用 user token: user_ids_count={user_ids_count}, "
-            f"user_token_base={user_token_base}, 扩展后 vocab_size={vocab_size}"
-        )
-
     config['token_params'] = {
         'pad_token_id': pad_id,
         'cls_token_id': cls_id,
@@ -256,18 +241,30 @@ def load_and_process_config(model_name: str, dataset_name: str, quant_method: st
 # --- 日志和随机种子函数保持不变 ---
 def setup_logging(log_path: Path):
     """配置日志记录器"""
-    class NewBestFormatter(logging.Formatter):
+    class ColorFormatter(logging.Formatter):
         red = "\033[31m"
+        blue = "\033[34m"
         reset = "\033[0m"
 
         def format(self, record):
-            if "New best |" not in record.getMessage():
+            message = record.getMessage()
+            color = None
+            if "New best |" in message:
+                color = self.red
+            elif (
+                message.startswith("Best Epoch:")
+                or message.startswith("Best Validation")
+                or message.startswith("Corresponding Test")
+            ):
+                color = self.blue
+
+            if color is None:
                 return super().format(record)
 
             original_msg = record.msg
             original_args = record.args
             try:
-                record.msg = f"{self.red}{record.getMessage()}{self.reset}"
+                record.msg = f"{color}{message}{self.reset}"
                 record.args = ()
                 return super().format(record)
             finally:
@@ -281,7 +278,7 @@ def setup_logging(log_path: Path):
     fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
     sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(NewBestFormatter('%(asctime)s - %(levelname)s - %(message)s'))
+    sh.setFormatter(ColorFormatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(sh)
 
     fh = logging.FileHandler(str(log_path), mode='a', encoding='utf-8')

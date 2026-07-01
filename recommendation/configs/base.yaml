@@ -1,5 +1,10 @@
 # 文件路径: configs/base.yaml
 
+# 训练数据构造方式:
+#   prefix_target: history -> target 样本，用于 code-level 生成式模型
+#   sequence_autoregressive: item 序列窗口内做 next-item 自回归监督
+data_format: prefix_target
+
 # 训练相关的通用默认值
 training_params:
   lr: 0.0001
@@ -18,7 +23,7 @@ model_params:
 
 # 评估相关的通用默认值
 evaluation_params:
-  topk_list: [5, 10, 20]
+  topk_list: [5, 10]
   beam_size: 20
   batch_size: 512
 

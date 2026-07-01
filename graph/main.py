@@ -1,5 +1,9 @@
 import argparse
+import json
+import logging
+import pprint
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -23,11 +27,12 @@ DEFAULT_DATASET = "Beauty"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-large-pca512"
 DEFAULT_EMBEDDING_MODALITY = "text"
 DEFAULT_CONFIG = GRAPH_ROOT / "config" / "lightgcn.yaml"
+LOG_SEPARATOR = "=" * 50
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Load graph recommendation splits",
+        description="Train graph recommendation model",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--dataset", type=str, default=DEFAULT_DATASET)
@@ -51,11 +56,6 @@ def main():
         help="Optional explicit .npy embedding path or filename under the dataset embeddings dir.",
     )
     parser.add_argument(
-        "--train",
-        action="store_true",
-        help="Run graph link prediction training.",
-    )
-    parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG,
@@ -63,6 +63,19 @@ def main():
     )
     args = parser.parse_args()
 
+    config_path = resolve_train_config_path(args.config)
+    train_config = load_train_config(config_path)
+    model_config = require_config(train_config, "model", "config")
+    model_name = require_config(model_config, "name", "config.model")
+    setup_logging()
+    logging.info(f"Configuration loaded for {model_name} on {args.dataset}.")
+    logging.info(LOG_SEPARATOR)
+    logging.info(
+        "\n" + pprint.pformat(build_log_config(args, config_path, train_config))
+    )
+    logging.info(LOG_SEPARATOR)
+
+    logging.info("Loading graph dataset...")
     data = load_dataset(
         args.data_root,
         args.dataset,
@@ -70,57 +83,123 @@ def main():
         embedding_modality=args.embedding_modality,
         embedding_path=args.embedding_path,
     )
+    logging.info("Building heterogeneous graph...")
     graph_data = build_hetero_graph(data)
     graph_summary = summarize_hetero_graph(graph_data)
+    log_data_summary(data, graph_summary)
 
-    label_width = 38
-
-    def print_row(label, value):
-        print(f"{label:<{label_width}}: {value}")
-
-    print_row("Dataset", args.dataset)
-    print_row("Users", data["num_users"])
-    print_row("Items", data["num_items"])
-    print_row("Users with samples", len(data["samples"]))
-    print_row(
-        "Train interactions from valid.history",
-        sum(len(x.train_items) for x in data["samples"]),
+    logging.info(f"Training config: {config_path}")
+    run_training(
+        train_config,
+        graph_data,
+        dataset_name=args.dataset,
+        data_root=args.data_root,
     )
-    print_row("Valid targets from valid.target", len(data["samples"]))
-    print_row("Test targets from test.target", len(data["samples"]))
-    print_row("Used items", len(data["used_item_ids"]))
-    print_row("Loaded item metadata", len(data["item_info"]))
-    print_row("All item metadata", len(data.get("item_metadata", {})))
-    if data["item_embeddings"] is not None:
-        print_row("Embedding path", data["embedding_path"])
-        print_row("Embedding shape", data["item_embeddings"].shape)
-        print_row("Embedding dtype", data["item_embeddings"].dtype)
-    print_row("Graph node types", graph_summary["node_types"])
-    print_row("Graph edge types", graph_summary["edge_types"])
-    print_row("Graph item feature shape", graph_summary["item_feature_shape"])
-    if "num_brands" in graph_summary:
-        print_row("Graph brand nodes", graph_summary["num_brands"])
-        print_row("Graph brand edges", graph_summary["brand_edges"])
-    if "num_categories" in graph_summary:
-        print_row("Graph category nodes", graph_summary["num_categories"])
-        print_row("Graph category edges", graph_summary["category_edges"])
-    print_row("Graph train edges", graph_summary["train_edges"])
-    print_row("Graph valid edges", graph_summary["valid_edges"])
-    print_row("Graph test edges", graph_summary["test_edges"])
 
-    if data["samples"]:
-        print_row("First sample", data["samples"][0])
-        first_item = data["samples"][0].train_items[0]
-        print_row(
-            "First used item info",
-            f"{first_item} -> {data['item_info'][first_item]}",
+
+def setup_logging():
+    class ColorFormatter(logging.Formatter):
+        red = "\033[31m"
+        blue = "\033[34m"
+        reset = "\033[0m"
+
+        def format(self, record):
+            message = record.getMessage()
+            color = None
+            if "New best |" in message:
+                color = self.red
+            elif (
+                message.startswith("Best Epoch:")
+                or message.startswith("Best Validation")
+                or message.startswith("Corresponding Test")
+            ):
+                color = self.blue
+
+            if color is None:
+                return super().format(record)
+
+            original_msg = record.msg
+            original_args = record.args
+            try:
+                record.msg = f"{color}{message}{self.reset}"
+                record.args = ()
+                return super().format(record)
+            finally:
+                record.msg = original_msg
+                record.args = original_args
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        ColorFormatter("%(asctime)s - %(levelname)s - %(message)s")
+    )
+    logger.addHandler(handler)
+
+
+def build_log_config(args, config_path: Path, train_config):
+    return {
+        "dataset_name": args.dataset,
+        "data_root": str(args.data_root),
+        "embedding_model": args.embedding_model,
+        "embedding_modality": args.embedding_modality,
+        "embedding_path": str(args.embedding_path) if args.embedding_path else None,
+        "training_config": str(config_path),
+        **train_config,
+    }
+
+
+def log_data_summary(data, graph_summary):
+    logging.info(
+        "Dataset loaded. "
+        f"Users={data['num_users']} | "
+        f"Items={data['num_items']} | "
+        f"Users with samples={len(data['samples'])} | "
+        f"Train interactions={sum(len(x.train_items) for x in data['samples'])} | "
+        f"Valid targets={len(data['samples'])} | "
+        f"Test targets={len(data['samples'])}"
+    )
+    logging.info(
+        "Item metadata loaded. "
+        f"Used items={len(data['used_item_ids'])} | "
+        f"Used item metadata={len(data['item_info'])} | "
+        f"All item metadata={len(data.get('item_metadata', {}))}"
+    )
+    if data["item_embeddings"] is not None:
+        logging.info(
+            "Item embeddings loaded. "
+            f"path={data['embedding_path']} | "
+            f"shape={data['item_embeddings'].shape} | "
+            f"dtype={data['item_embeddings'].dtype}"
         )
 
-    if args.train:
-        config_path = resolve_train_config_path(args.config)
-        train_config = load_train_config(config_path)
-        print_row("Training config", config_path)
-        run_training(train_config, graph_data, print_row)
+    logging.info(
+        "Graph built. "
+        f"node_types={graph_summary['node_types']} | "
+        f"edge_types={graph_summary['edge_types']} | "
+        f"item_feature_shape={graph_summary['item_feature_shape']}"
+    )
+    logging.info(
+        "Graph splits. "
+        f"train_edges={graph_summary['train_edges']} | "
+        f"valid_edges={graph_summary['valid_edges']} | "
+        f"test_edges={graph_summary['test_edges']}"
+    )
+    if "num_brands" in graph_summary:
+        logging.info(
+            "Brand graph. "
+            f"nodes={graph_summary['num_brands']} | "
+            f"edges={graph_summary['brand_edges']}"
+        )
+    if "num_categories" in graph_summary:
+        logging.info(
+            "Category graph. "
+            f"nodes={graph_summary['num_categories']} | "
+            f"edges={graph_summary['category_edges']}"
+        )
 
 
 def resolve_train_config_path(path: Path) -> Path:
@@ -188,11 +267,12 @@ def build_train_loader(
     )
 
 
-def run_training(config, graph_data, print_row):
+def run_training(config, graph_data, dataset_name: str, data_root: Path):
     model_config = require_config(config, "model", "config")
     loader_config = require_config(config, "loader", "config")
     metrics_config = require_config(config, "metrics", "config")
     training_config = require_config(config, "training", "config")
+    output_config = config.get("output") or {}
     seed = int(require_config(training_config, "seed", "config.training"))
     set_random_seed(seed)
 
@@ -239,10 +319,12 @@ def run_training(config, graph_data, print_row):
         require_config(training_config, "early_stop_patience", "config.training")
     )
 
+    if str(device_name).startswith("cuda") and not torch.cuda.is_available():
+        device_name = "cpu"
     device = torch.device(device_name)
-    print_row("Random seed", seed)
-    print_row("Training device", device)
+    logging.info(f"Using device: {device}")
 
+    logging.info("Creating DataLoaders...")
     train_loader = build_train_loader(
         graph_data=graph_data,
         batch_size=batch_size,
@@ -250,6 +332,7 @@ def run_training(config, graph_data, print_row):
         negative_samples=negative_samples,
         num_workers=num_workers,
     )
+    logging.info(f"Dynamically loading model: {model_name}")
     model = build_model(
         model_name=model_name,
         model_config=model_config,
@@ -274,14 +357,19 @@ def run_training(config, graph_data, print_row):
         num_epochs=epochs,
     )
 
-    print_row("Train batches", len(train_loader))
-    print_row("Training loss", "BPR")
-    print_row("Model name", model_name)
-    print_row("Negatives per positive", negative_samples)
-    print_row("Full-sort eval batch size", full_sort_batch_size)
-    print_row("Monitor metric", monitor_metric)
-    print_row("Early stop patience", early_stop_patience)
-    print_row("Model parameters", sum(p.numel() for p in model.parameters()))
+    logging.info(
+        "Training setup. "
+        f"seed={seed} | "
+        f"model={model_name} | "
+        f"loss=BPR | "
+        f"train_batches={len(train_loader)} | "
+        f"negative_samples={negative_samples} | "
+        f"full_sort_batch_size={full_sort_batch_size} | "
+        f"monitor_metric={monitor_metric} | "
+        f"early_stop_patience={early_stop_patience}"
+    )
+    logging.info(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
+    logging.info(LOG_SEPARATOR)
 
     trainer = GraphTrainer(
         model=model,
@@ -300,6 +388,15 @@ def run_training(config, graph_data, print_row):
         full_sort_batch_size=full_sort_batch_size,
         monitor_metric=monitor_metric,
         early_stop_patience=early_stop_patience,
+    )
+    save_final_item_embeddings(
+        model=model,
+        graph_data=graph_data,
+        device=device,
+        output_config=output_config,
+        dataset_name=dataset_name,
+        model_name=model_name,
+        item2id_path=data_root / dataset_name / f"{dataset_name}.item2id",
     )
 
 
@@ -333,6 +430,106 @@ def build_model(
             target_edge_type=TARGET_EDGE_TYPE,
         )
     raise ValueError(f"Unsupported model.name: {model_name}")
+
+
+def resolve_output_root(output_config, dataset_name: str, model_name: str) -> Path:
+    output_root = output_config.get(
+        "output_root",
+        "../ckpt/graph/{dataset_name}/{model_name}",
+    )
+    path = Path(
+        str(output_root).format(
+            dataset_name=dataset_name,
+            model_name=model_name,
+        )
+    )
+    if not path.is_absolute():
+        path = GRAPH_ROOT / path
+    return path.resolve()
+
+
+def load_item_row_mapping(item2id_path: Path, num_items: int) -> list[str]:
+    id_to_raw_item = [None] * int(num_items)
+    with item2id_path.open("r", encoding="utf-8") as fp:
+        for line_num, line in enumerate(fp, start=1):
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) != 2:
+                raise ValueError(
+                    f"Bad item2id line in {item2id_path}:{line_num}: {line}"
+                )
+            raw_item_id, item_id_text = parts
+            item_id = int(item_id_text)
+            if not 0 <= item_id < num_items:
+                raise ValueError(
+                    f"item_id out of range in {item2id_path}:{line_num}: {item_id}"
+                )
+            id_to_raw_item[item_id] = raw_item_id
+
+    missing = [idx for idx, raw_item in enumerate(id_to_raw_item) if raw_item is None]
+    if missing:
+        raise ValueError(
+            f"{item2id_path} missing raw item ids for remapped ids: {missing[:10]}"
+        )
+    return id_to_raw_item
+
+
+def save_final_item_embeddings(
+    model,
+    graph_data,
+    device: torch.device,
+    output_config,
+    dataset_name: str,
+    model_name: str,
+    item2id_path: Path,
+):
+    if not hasattr(model, "encode"):
+        raise AttributeError("Model must implement encode(...) to save item embeddings.")
+
+    output_root = resolve_output_root(output_config, dataset_name, model_name)
+    output_root.mkdir(parents=True, exist_ok=True)
+    embedding_path = output_root / output_config.get(
+        "item_embeddings",
+        "final_item_embeddings.npy",
+    )
+    mapping_path = output_root / output_config.get(
+        "item_mapping",
+        "final_item_embedding_mapping.jsonl",
+    )
+
+    model.eval()
+    graph_data = graph_data.to(device)
+    with torch.no_grad():
+        z_dict = model.encode(graph_data)
+        if "item" not in z_dict:
+            raise KeyError("Encoded graph output does not contain an 'item' embedding.")
+        item_embeddings = z_dict["item"].detach().cpu().numpy()
+
+    np.save(embedding_path, item_embeddings)
+
+    id_to_raw_item = load_item_row_mapping(item2id_path, item_embeddings.shape[0])
+    with mapping_path.open("w", encoding="utf-8") as fp:
+        for row_index, raw_item_id in enumerate(id_to_raw_item):
+            fp.write(
+                json.dumps(
+                    {
+                        "row_index": row_index,
+                        "item_id": row_index,
+                        "raw_item_id": raw_item_id,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    logging.info(
+        "Saved final item embeddings. "
+        f"embeddings={embedding_path} | "
+        f"mapping={mapping_path} | "
+        f"shape={item_embeddings.shape}"
+    )
 
 
 if __name__ == "__main__":

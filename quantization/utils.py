@@ -47,19 +47,35 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
     
 def setup_paths(args):
-    """根据输入参数构建文本模态量化路径。"""
+    """根据输入参数构建量化路径。"""
     emb_dir = os.path.join(args.data_base_path, args.dataset_name, "embeddings")
     os.makedirs(emb_dir, exist_ok=True)
 
+    embedding_source = getattr(args, 'embedding_source', 'text') or 'text'
     embedding_modality = getattr(args, 'embedding_modality', 'text') or 'text'
-    if embedding_modality != 'text':
-        raise ValueError("当前仅支持文本模态 embedding_modality=text。")
-    if not args.embedding_model:
-        raise ValueError("必须提供 '--embedding_model' 参数。")
+    if embedding_source == 'text':
+        if embedding_modality != 'text':
+            raise ValueError("当前文本输入仅支持 embedding_modality=text。")
+        if not args.embedding_model:
+            raise ValueError("embedding_source=text 时必须提供 '--embedding_model' 参数。")
 
-    embedding_filename = f"{args.dataset_name}.emb-text-{args.embedding_model}.npy"
-    embedding_path = os.path.join(emb_dir, embedding_filename)
-    output_base_dir = f"{args.model_name}/text-{args.embedding_model}"
+        embedding_filename = f"{args.dataset_name}.emb-text-{args.embedding_model}.npy"
+        embedding_path = os.path.join(emb_dir, embedding_filename)
+        output_base_dir = f"{args.model_name}/text-{args.embedding_model}"
+        input_label = "输入文本嵌入文件"
+    elif embedding_source == 'graph':
+        if not args.graph_model:
+            raise ValueError("embedding_source=graph 时必须提供 '--graph_model' 参数。")
+        graph_dir = os.path.join(
+            args.graph_ckpt_base_path,
+            args.dataset_name,
+            args.graph_model,
+        )
+        embedding_path = os.path.join(graph_dir, "final_item_embeddings.npy")
+        output_base_dir = f"{args.model_name}/graph-{args.graph_model}"
+        input_label = "输入图模型嵌入文件"
+    else:
+        raise ValueError(f"Unsupported embedding_source: {embedding_source}")
 
     log_dir = os.path.join(args.log_base_path, args.dataset_name, output_base_dir)
     ckpt_dir = os.path.join(args.ckpt_base_path, args.dataset_name, output_base_dir)
@@ -69,7 +85,7 @@ def setup_paths(args):
         os.makedirs(d, exist_ok=True)
 
     print("--- 自动构建路径 ---")
-    print(f"输入文本嵌入文件: {embedding_path}")
+    print(f"{input_label}: {embedding_path}")
     print(f"日志目录: {log_dir}")
     print(f"模型目录: {ckpt_dir}")
     print(f"码本根目录: {codebook_base_dir}")
@@ -419,17 +435,15 @@ def build_codebook_path(codebook_base_path: str, dataset_name: str,
                         embedding_model: str = None,
                         embedding_modality: str = 'text') -> str:
     """
-    构建文本模态码本路径，例如 Baby.text.rqvae.npy。
+    构建码本路径，例如 Baby.text.rqvae.npy 或 Beauty.graph-lightgcn.rqvae.npy。
     """
     ds = str(dataset_name)
     model_tag = str(model_name).lower()
     mod_tag = str(embedding_modality or 'text').lower()
-    if mod_tag != 'text':
-        raise ValueError("当前仅支持文本模态码本路径。")
 
     dir_path = os.path.join(codebook_base_path, ds, "codebooks")
     os.makedirs(dir_path, exist_ok=True)
 
-    filename = f"{ds}.text.{model_tag}.npy"
+    filename = f"{ds}.{mod_tag}.{model_tag}.npy"
 
     return os.path.join(dir_path, filename)

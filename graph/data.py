@@ -1,9 +1,17 @@
 import json
+import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from common.data_split import split_from_interactions
 
 
 @dataclass
@@ -28,50 +36,44 @@ def load_id_count(path: Path) -> int:
     return max_id + 1
 
 
-@dataclass
-class SplitRow:
-    user: int
-    history: List[int]
-    target: int
+def load_graph_samples(inter_path: Path) -> List[UserTrainValidTest]:
+    split_data = split_from_interactions(
+        inter_path,
+        min_sequence_len=3,
+        max_history_len=None,
+    )
 
+    train_by_user = {
+        int(user_sequence.user): [int(item) for item in user_sequence.items]
+        for user_sequence in split_data.train_sequences
+    }
+    valid_by_user = {
+        int(sample.user): int(sample.target)
+        for sample in split_data.valid_samples
+    }
+    test_by_user = {
+        int(sample.user): int(sample.target)
+        for sample in split_data.test_samples
+    }
 
-def load_split(path: Path) -> List[SplitRow]:
-    rows = []
-    with path.open("r", encoding="utf-8") as fp:
-        for line_num, line in enumerate(fp, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            try:
-                rows.append(
-                    SplitRow(
-                        user=int(obj["user"]),
-                        history=[int(x) for x in obj.get("history", [])],
-                        target=int(obj["target"]),
-                    )
-                )
-            except KeyError as exc:
-                raise KeyError(f"{path}:{line_num} missing field {exc}") from exc
-    print(f"Loaded {path.name}: {len(rows)} users")
-    return rows
-
-
-def merge_valid_test(valid_rows: List[SplitRow], test_rows: List[SplitRow]) -> List[UserTrainValidTest]:
-    test_by_user = {row.user: row for row in test_rows}
-    samples = []
-    for valid_row in valid_rows:
-        test_row = test_by_user.get(valid_row.user)
-        if test_row is None:
-            raise ValueError(f"Missing test row for user {valid_row.user}")
-        samples.append(
-            UserTrainValidTest(
-                user=valid_row.user,
-                train_items=valid_row.history,
-                valid_item=valid_row.target,
-                test_item=test_row.target,
-            )
+    train_users = set(train_by_user)
+    if train_users != set(valid_by_user) or train_users != set(test_by_user):
+        raise ValueError(
+            "Leave-one-out split produced mismatched users across train/valid/test."
         )
+
+    samples = [
+        UserTrainValidTest(
+            user=user,
+            train_items=train_by_user[user],
+            valid_item=valid_by_user[user],
+            test_item=test_by_user[user],
+        )
+        for user in sorted(train_by_user)
+    ]
+    logging.info(
+        f"Loaded {inter_path.name}: {len(samples)} users with leave-one-out samples"
+    )
     return samples
 
 
@@ -104,7 +106,7 @@ def load_used_item_info(path: Path, item_ids: Set[int]) -> Dict[int, dict]:
     if missing_ids:
         raise KeyError(f"{path} missing metadata for item ids: {missing_ids[:10]}")
 
-    print(f"Loaded {path.name}: {len(item_info)} used items")
+    logging.info(f"Loaded {path.name}: {len(item_info)} used items")
     return item_info
 
 
@@ -129,7 +131,9 @@ def load_all_item_metadata(path: Path, num_items: int) -> Dict[int, dict]:
                 "categories": [],
             }
 
-    print(f"Loaded {path.name}: {len(item_metadata)} items with brand/category metadata")
+    logging.info(
+        f"Loaded {path.name}: {len(item_metadata)} items with brand/category metadata"
+    )
     return item_metadata
 
 
@@ -187,7 +191,9 @@ def load_embeddings(path: Path, expected_items: int) -> np.ndarray:
             f"num_items ({expected_items}): {path}"
         )
 
-    print(f"Loaded {path.name}: shape={embeddings.shape}, dtype={embeddings.dtype}")
+    logging.info(
+        f"Loaded {path.name}: shape={embeddings.shape}, dtype={embeddings.dtype}"
+    )
     return embeddings
 
 
@@ -202,9 +208,7 @@ def load_dataset(
     if not dataset_dir.exists():
         raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
 
-    valid_rows = load_split(dataset_dir / f"{dataset}.valid.jsonl")
-    test_rows = load_split(dataset_dir / f"{dataset}.test.jsonl")
-    samples = merge_valid_test(valid_rows, test_rows)
+    samples = load_graph_samples(dataset_dir / f"{dataset}.inter.json")
     used_item_ids = collect_used_item_ids(samples)
     num_users = load_id_count(dataset_dir / f"{dataset}.user2id")
     num_items = load_id_count(dataset_dir / f"{dataset}.item2id")

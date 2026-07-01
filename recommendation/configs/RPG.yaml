@@ -1,5 +1,7 @@
 # 文件路径: configs/RPG.yaml
 
+data_format: sequence_autoregressive
+
 # RPG 模型独有的架构参数
 model_params:
   max_len: 50
@@ -13,18 +15,19 @@ model_params:
   attn_pdrop: 0.7 # 0.5
   layer_norm_epsilon: 1e-12
   initializer_range: 0.02
-  temperature: 0.07 # 0.03
+  temperature: 0.05 # 0.03
 
 # ✨ 范例：如果 RPG 需要不同的 batch size，可以在这里覆盖 base.yaml
 training_params:
-  num_epochs: 150
-  batch_size: 128 # 256
-  lr: 0.003 # 0.01
+  num_epochs: 1000
+  batch_size: 64 # 256
+  lr: 0.001 # 0.01
   weight_decay: 0.0
-  scheduler: cosine
-  warmup_steps: 10000
+  scheduler: constant_with_warmup
+  warmup_steps: 5000
   max_grad_norm: 1.0
   eval_interval: 1
 
 evaluation_params:
   batch_size: 512 # 评估时的 batch size
+  use_prefix_trie: true
