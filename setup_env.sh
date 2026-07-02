@@ -86,10 +86,10 @@ if [[ "${CHECK_ONLY}" -eq 1 ]]; then
 fi
 
 echo "Upgrading pip tooling..."
-conda run -n "${ENV_NAME}" python -m pip install --upgrade pip setuptools wheel
+conda run --no-capture-output -n "${ENV_NAME}" python -m pip install --upgrade pip setuptools wheel
 
 echo "Installing project requirements..."
-conda run -n "${ENV_NAME}" python -m pip install -r "${REQUIREMENTS_FILE}"
+conda run --no-capture-output -n "${ENV_NAME}" python -m pip install -r "${REQUIREMENTS_FILE}"
 
 echo
 echo "Environment '${ENV_NAME}' is ready."
