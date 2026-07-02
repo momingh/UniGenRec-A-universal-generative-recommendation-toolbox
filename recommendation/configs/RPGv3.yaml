@@ -1,0 +1,33 @@
+# 文件路径: configs/RPGv3.yaml
+
+data_format: sequence_autoregressive
+
+# RPGv3 模型独有的架构参数
+model_params:
+  max_len: 50
+  n_embd: 448
+  n_layer: 2
+  n_head: 4
+  n_inner: 1024
+  activation_function: gelu_new
+  resid_pdrop: 0.0
+  embd_pdrop: 0.5
+  attn_pdrop: 0.7 # 0.5
+  layer_norm_epsilon: 1e-12
+  initializer_range: 0.02
+  temperature: 0.05 # 0.03
+
+# ✨ 范例：如果 RPGv3 需要不同的 batch size，可以在这里覆盖 base.yaml
+training_params:
+  num_epochs: 1000
+  batch_size: 64 # 256
+  lr: 0.001 # 0.01
+  weight_decay: 0.0
+  scheduler: constant_with_warmup
+  warmup_steps: 5000
+  max_grad_norm: 1.0
+  eval_interval: 1
+
+evaluation_params:
+  batch_size: 512 # 评估时的 batch size
+  use_prefix_trie: true

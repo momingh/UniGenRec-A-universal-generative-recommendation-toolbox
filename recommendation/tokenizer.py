@@ -248,7 +248,7 @@ def get_tokenizer(model_name: str, config: Dict[str, Any], item_to_code_map: Dic
         return GenerativeTokenizer(config, item_to_code_map, padding_side='right')
     elif 'GPT2' in model_name or 'LLM' in model_name:
         return GenerativeTokenizer(config, item_to_code_map, padding_side='left')
-    elif model_name == 'RPG':
+    elif model_name in {'RPG', 'RPGV1', 'RPGV2', 'RPGV3', 'RPGV4'}:
         return RetrievalTokenizer(config, item_to_code_map)
     else:
         logger.warning(f"未知模型: {model_name}，使用 left-padding GenerativeTokenizer")

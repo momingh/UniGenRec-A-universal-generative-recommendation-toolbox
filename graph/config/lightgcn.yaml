@@ -27,4 +27,5 @@ training:
   warmup_steps: 0
   scheduler: none
   max_train_batches: null
+  eval_interval: 1
   early_stop_patience: 20

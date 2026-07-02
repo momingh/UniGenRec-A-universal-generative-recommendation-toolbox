@@ -119,7 +119,7 @@ def make_worker_init_fn(seed: int):
 
 def main():
     parser = argparse.ArgumentParser(description="GenRec Universal Training Pipeline")
-    parser.add_argument('--model', type=str, default="TIGER", help='模型名稱 (e.g., TIGER, GPT2, RPG)')
+    parser.add_argument('--model', type=str, default="TIGER", help='模型名稱 (e.g., TIGER, GPT2, RPG, RPGv1, RPGv2, RPGv3, RPGv4)')
     parser.add_argument('--dataset', type=str, default="amazon-musical-instruments-23", help='数据集名稱 (e.g., Beauty)')
     parser.add_argument('--quant_method', type=str, default="rqvae", choices=['rqvae', 'rqvae_faiss', 'opq', 'qinco', 'qinco_aux', 'qinco_v2', 'rqkmeans', 'rqkmeans_plus'], help='量化方法')
     parser.add_argument('--embedding_modality', type=str, default='text', help='量化模态类型，对应不同的 codebook (默认 text，例如 graph-lightgcn)')

@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import HANConv, Linear
+from torch_geometric.nn import HANConv
 from tqdm import tqdm
 
 EdgeType = Tuple[str, str, str]
@@ -75,15 +75,19 @@ class HANLinkPredictor(nn.Module):
         self.target_edge_type = target_edge_type
 
         node_types, _ = metadata
-        self.input_linears = nn.ModuleDict()
+        self.feature_node_types = set()
         self.node_embeddings = nn.ModuleDict()
 
         for node_type in node_types:
             if node_type in self.input_dims:
-                self.input_linears[node_type] = Linear(
-                    self.input_dims[node_type],
-                    self.hidden_dim,
-                )
+                if int(self.input_dims[node_type]) != self.hidden_dim:
+                    raise ValueError(
+                        f"Node features for {node_type} have dim="
+                        f"{self.input_dims[node_type]}, but hidden_dim="
+                        f"{self.hidden_dim}. HAN uses raw node features directly "
+                        "and does not apply a projection."
+                    )
+                self.feature_node_types.add(node_type)
             else:
                 self.node_embeddings[node_type] = nn.Embedding(
                     self.num_nodes_dict[node_type],
@@ -231,13 +235,17 @@ class HANLinkPredictor(nn.Module):
 
         for node_type in node_types:
             store = data[node_type]
-            if node_type in self.input_linears:
+            if node_type in self.feature_node_types:
                 if not hasattr(store, "x") or store.x is None:
                     raise KeyError(f"Missing node features for node type: {node_type}")
-                x_dict[node_type] = F.normalize(
-                    self.input_linears[node_type](store.x.float()),
-                    p=2,
-                    dim=-1,
+                if int(store.x.size(-1)) != self.hidden_dim:
+                    raise ValueError(
+                        f"Node features for {node_type} have dim={store.x.size(-1)}, "
+                        f"but hidden_dim={self.hidden_dim}."
+                    )
+                x_dict[node_type] = self._normalize_if_target(
+                    node_type,
+                    store.x.float(),
                 )
                 continue
 
@@ -253,10 +261,9 @@ class HANLinkPredictor(nn.Module):
             else:
                 node_ids = node_ids.to(self.node_embeddings[node_type].weight.device)
 
-            x_dict[node_type] = F.normalize(
+            x_dict[node_type] = self._normalize_if_target(
+                node_type,
                 self.node_embeddings[node_type](node_ids),
-                p=2,
-                dim=-1,
             )
 
         return x_dict
@@ -270,6 +277,16 @@ class HANLinkPredictor(nn.Module):
             dst_store.dst_pos_index,
             dst_store.dst_neg_index,
         )
+
+    def _normalize_if_target(
+        self,
+        node_type: str,
+        z: torch.Tensor,
+    ) -> torch.Tensor:
+        src_type, _, dst_type = self.target_edge_type
+        if node_type in {src_type, dst_type}:
+            return F.normalize(z, p=2, dim=-1)
+        return z
 
 
 def build_han_link_predictor(

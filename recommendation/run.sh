@@ -6,3 +6,5 @@ python main.py --dataset ml-100k --quant_method rqvae  --model TIGER
 export CUDA_VISIBLE_DEVICES=7
 python main.py --model TIGER --dataset Beauty --quant_method rqvae_faiss
 python main.py --model RPG --dataset Beauty --quant_method qinco
+python main.py --model RPG --dataset Beauty --quant_method rqvae_faiss --embedding_modality gra
+ph-lightgcn

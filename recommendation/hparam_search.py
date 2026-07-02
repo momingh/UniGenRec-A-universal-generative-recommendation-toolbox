@@ -488,7 +488,7 @@ def run_trial(args, trial_index: int, overrides: Dict[str, Any]) -> Dict[str, An
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Minimal hyperparameter search for GenRec.")
-    parser.add_argument("--model", type=str, default="RPG", help="Model name, e.g. RPG, TIGER, GPT2")
+    parser.add_argument("--model", type=str, default="RPG", help="Model name, e.g. RPG, RPGv1, RPGv2, RPGv3, RPGv4, TIGER, GPT2")
     parser.add_argument("--dataset", type=str, default="amazon-musical-instruments-23", help="Dataset name")
     parser.add_argument(
         "--quant_method",

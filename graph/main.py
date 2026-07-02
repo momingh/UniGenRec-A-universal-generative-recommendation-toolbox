@@ -15,10 +15,15 @@ from torch_geometric.sampler import NegativeSampling
 from build_graph import (
     TARGET_EDGE_TYPE,
     build_hetero_graph,
+    filter_hetero_graph,
     summarize_hetero_graph,
 )
 from data import load_dataset
-from models import build_han_link_predictor, build_lightgcn_link_predictor
+from models import (
+    build_han_link_predictor,
+    build_lightgcn_link_predictor,
+    build_metapath2vec_link_predictor,
+)
 from training import GraphTrainer, build_lr_scheduler
 
 GRAPH_ROOT = Path(__file__).resolve().parent
@@ -85,6 +90,14 @@ def main():
     )
     logging.info("Building heterogeneous graph...")
     graph_data = build_hetero_graph(data)
+    graph_config = train_config.get("graph") or {}
+    if graph_config:
+        logging.info(f"Applying graph filter: {graph_config}")
+        graph_data = filter_hetero_graph(
+            graph_data,
+            node_types=graph_config.get("node_types"),
+            edge_types=graph_config.get("edge_types"),
+        )
     graph_summary = summarize_hetero_graph(graph_data)
     log_data_summary(data, graph_summary)
 
@@ -315,6 +328,9 @@ def run_training(config, graph_data, dataset_name: str, data_root: Path):
         "max_train_batches",
         "config.training",
     )
+    eval_interval = int(training_config.get("eval_interval", 1))
+    if eval_interval <= 0:
+        raise ValueError(f"config.training.eval_interval must be positive: {eval_interval}")
     early_stop_patience = int(
         require_config(training_config, "early_stop_patience", "config.training")
     )
@@ -361,11 +377,12 @@ def run_training(config, graph_data, dataset_name: str, data_root: Path):
         "Training setup. "
         f"seed={seed} | "
         f"model={model_name} | "
-        f"loss=BPR | "
+        f"loss={resolve_loss_name(model_name, model_config)} | "
         f"train_batches={len(train_loader)} | "
         f"negative_samples={negative_samples} | "
         f"full_sort_batch_size={full_sort_batch_size} | "
         f"monitor_metric={monitor_metric} | "
+        f"eval_interval={eval_interval} | "
         f"early_stop_patience={early_stop_patience}"
     )
     logging.info(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
@@ -388,6 +405,7 @@ def run_training(config, graph_data, dataset_name: str, data_root: Path):
         full_sort_batch_size=full_sort_batch_size,
         monitor_metric=monitor_metric,
         early_stop_patience=early_stop_patience,
+        eval_interval=eval_interval,
     )
     save_final_item_embeddings(
         model=model,
@@ -429,7 +447,37 @@ def build_model(
             eval_top_k=eval_top_k,
             target_edge_type=TARGET_EDGE_TYPE,
         )
+    if model_name in {"metapath2vec", "meta_path2vec"}:
+        return build_metapath2vec_link_predictor(
+            graph_data,
+            hidden_dim=hidden_dim,
+            walk_length=int(
+                require_config(model_config, "walk_length", "config.model")
+            ),
+            context_size=int(
+                require_config(model_config, "context_size", "config.model")
+            ),
+            walks_per_node=int(
+                require_config(model_config, "walks_per_node", "config.model")
+            ),
+            num_negative_samples=int(
+                require_config(model_config, "num_negative_samples", "config.model")
+            ),
+            bpr_weight=float(model_config.get("bpr_weight", 1.0)),
+            metapath=model_config.get("metapath"),
+            eval_top_k=eval_top_k,
+            target_edge_type=TARGET_EDGE_TYPE,
+        )
     raise ValueError(f"Unsupported model.name: {model_name}")
+
+
+def resolve_loss_name(model_name: str, model_config=None) -> str:
+    if model_name in {"metapath2vec", "meta_path2vec"}:
+        bpr_weight = float((model_config or {}).get("bpr_weight", 1.0))
+        if bpr_weight > 0.0:
+            return "skipgram+BPR"
+        return "skipgram"
+    return "BPR"
 
 
 def resolve_output_root(output_config, dataset_name: str, model_name: str) -> Path:

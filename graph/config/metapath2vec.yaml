@@ -1,0 +1,43 @@
+model:
+  name: metapath2vec
+  hidden_dim: 512
+  num_layers: 0
+  walk_length: 20
+  context_size: 5
+  walks_per_node: 5
+  num_negative_samples: 5
+  bpr_weight: 0.0
+  metapath:
+    - [user, interacts, item]
+    - [item, has_brand, brand]
+    - [brand, brand_of, item]
+    - [item, has_category, category]
+    - [category, category_of, item]
+    - [item, rev_interacts, user]
+
+loader:
+  batch_size: 1024
+  num_neighbors: [0]
+  negative_samples: 2
+  num_workers: 0
+
+metrics:
+  top_k: [10]
+  full_sort_batch_size: 512
+
+output:
+  output_root: ../ckpt/graph/{dataset_name}/{model_name}
+  item_embeddings: final_item_embeddings.npy
+  item_mapping: final_item_embedding_mapping.jsonl
+
+training:
+  seed: 42
+  device: cuda:0
+  epochs: 1000
+  lr: 0.001
+  weight_decay: 0.0001
+  warmup_steps: 0
+  scheduler: none
+  max_train_batches: null
+  eval_interval: 1
+  early_stop_patience: 20

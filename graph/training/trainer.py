@@ -52,25 +52,36 @@ class GraphTrainer:
         full_sort_batch_size: Optional[int] = None,
         monitor_metric: Optional[str] = None,
         early_stop_patience: Optional[int] = None,
+        eval_interval: int = 1,
     ) -> TrainingState:
+        eval_interval = int(eval_interval)
+        if eval_interval <= 0:
+            raise ValueError(f"eval_interval must be positive, got {eval_interval}")
+
         best_state = None
         best_metrics = None
         best_test_metrics = None
         epochs_without_improvement = 0
         epoch_separator = "-" * 80
+        num_epochs = int(num_epochs)
 
         with logging_redirect_tqdm():
-            for epoch in range(1, int(num_epochs) + 1):
+            for epoch in range(1, num_epochs + 1):
                 self.state.epoch = epoch
                 epoch_start = time.perf_counter()
                 logging.info(epoch_separator)
                 logging.info(
-                    f"Epoch {epoch:03d}/{int(num_epochs):03d} started | "
+                    f"Epoch {epoch:03d}/{num_epochs:03d} started | "
                     f"lr={self._format_lr()}"
                 )
                 train_loss = self.train_one_epoch(train_loader)
 
-                if valid_data is not None:
+                should_eval = (
+                    valid_data is not None
+                    and (epoch % eval_interval == 0 or epoch == num_epochs)
+                )
+
+                if should_eval:
                     logging.info(
                         f"Evaluating epoch {epoch:03d} | lr={self._format_lr()}"
                     )
@@ -111,7 +122,7 @@ class GraphTrainer:
                             logging.info(
                                 f"No improvement | "
                                 f"best_epoch={self.state.best_epoch:03d} | "
-                                f"early_stop={epochs_without_improvement}/"
+                                f"early_stop_checks={epochs_without_improvement}/"
                                 f"{early_stop_patience}"
                             )
 
@@ -130,7 +141,7 @@ class GraphTrainer:
                         else "N/A"
                     )
                     logging.info(
-                        f"Epoch {epoch:03d}/{int(num_epochs):03d} | "
+                        f"Epoch {epoch:03d}/{num_epochs:03d} | "
                         f"loss={train_loss:.8f} | "
                         f"lr={self._format_lr()} | "
                         f"val {monitor_metric}={current_metric} | "
@@ -148,11 +159,16 @@ class GraphTrainer:
                         break
                 else:
                     epoch_time = time.perf_counter() - epoch_start
+                    eval_status = (
+                        "not_configured"
+                        if valid_data is None
+                        else f"skipped_next_interval={eval_interval}"
+                    )
                     logging.info(
-                        f"Epoch {epoch:03d}/{int(num_epochs):03d} | "
+                        f"Epoch {epoch:03d}/{num_epochs:03d} | "
                         f"loss={train_loss:.8f} | "
                         f"lr={self._format_lr()} | "
-                        f"eval=skipped | "
+                        f"eval={eval_status} | "
                         f"time={epoch_time:.2f}s"
                     )
 

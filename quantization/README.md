@@ -18,6 +18,11 @@ python main.py \
   --graph_model lightgcn
 ```
 
+python main.py \
+  --model_name rqvae_faiss \
+  --dataset_name Beauty \
+  --embedding_source graph \
+  --graph_model lightgcn
 
 python main.py \
   --model_name rqvae \
