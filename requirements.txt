@@ -1,15 +1,21 @@
-# Install PyTorch manually based on your CUDA version:
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://download.pytorch.org/whl/cu121
+--find-links https://data.pyg.org/whl/torch-2.5.1+cu121.html
 
-faiss==1.12.0
+faiss-cpu==1.12.0
 joblib==1.4.2
 numpy==1.26.4
 openai==2.6.0
 pandas==1.5.3
 Pillow==11.2.1
+pyg-lib==0.4.0+pt25cu121
 PyYAML==6.0.2
 requests==2.32.3
 scikit-learn==1.6.1
+sentence-transformers==4.1.0
+torch==2.5.1+cu121
+torchaudio==2.5.1+cu121
+torch-geometric==2.6.1
+torchvision==0.20.1+cu121
 tqdm==4.65.0
 transformers==4.51.3
-
+urllib3==2.2.3

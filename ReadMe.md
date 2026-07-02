@@ -86,12 +86,13 @@ Inference (Beam Search / Prefix-tree / Contrastive Rerank)
 **Requirements**
 - Python **3.10** (recommended)
 - CUDA 11.8+ (for GPU acceleration)
-- PyTorch, CUDA, and other dependencies will be installed automatically via `requirements.txt`
+- Install the `rqvae` conda environment via `setup_env.sh`
 
 ```bash
 git clone https://github.com/yourname/UniGenRec
 cd UniGenRec
-pip install -r requirements.txt
+./setup_env.sh
+conda activate rqvae
 ```
 ## 1 Data Preprocessing
 
