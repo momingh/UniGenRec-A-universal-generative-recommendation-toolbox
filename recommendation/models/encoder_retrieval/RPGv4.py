@@ -56,6 +56,7 @@ class RPGv4(AbstractModel):
         self.codebook_size = int(config["codebook_size"])
         self.eos_token = sum(self.vocab_sizes) + 1
         self.temperature = float(model_params["temperature"])
+        self.item_ce_loss_weight = float(model_params.get("item_ce_loss_weight", 1.0))
 
         max_item_id = max(item_to_code_map)
         pad_token_id = int(token_params["pad_token_id"])
@@ -96,9 +97,10 @@ class RPGv4(AbstractModel):
         self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
 
         logger.info(
-            "RPGv4 initialized: items=%d, code_len=%d.",
+            "RPGv4 initialized: items=%d, code_len=%d, item_ce_loss_weight=%.4f.",
             self.item_id2tokens.shape[0] - 1,
             self.code_len,
+            self.item_ce_loss_weight,
         )
 
     @property
@@ -119,6 +121,69 @@ class RPGv4(AbstractModel):
             f"#Total trainable parameters: {total_params}\n"
         )
 
+    def _sid_mean_embeddings(self, sid_tokens: torch.Tensor) -> torch.Tensor:
+        sid_embs = self.gpt2.wte(sid_tokens)
+        return self.norm(sid_embs).mean(dim=-2)
+
+    def _compute_code_token_loss(
+        self,
+        final_states: torch.Tensor,
+        label_mask: torch.Tensor,
+        token_labels: torch.Tensor,
+    ) -> torch.Tensor:
+        selected_states = final_states.view(
+            -1,
+            self.n_pred_head,
+            self.hidden_size,
+        )[label_mask]
+        selected_states = F.normalize(selected_states, dim=-1)
+        selected_states_chunks = torch.chunk(
+            selected_states,
+            self.n_pred_head,
+            dim=1,
+        )
+
+        token_emb = self.gpt2.wte.weight[1:self.eos_token]
+        token_emb = F.normalize(token_emb, dim=-1)
+        token_embs_chunks = torch.split(token_emb, self.vocab_sizes, dim=0)
+
+        token_logits = [
+            torch.matmul(
+                selected_states_chunks[i].squeeze(dim=1),
+                token_embs_chunks[i].T,
+            )
+            / self.temperature
+            for i in range(self.n_pred_head)
+        ]
+
+        code_token_losses = [
+            self.loss_fct(
+                token_logits[i],
+                token_labels[:, i] - self.bases[i] - 1,
+            )
+            for i in range(self.n_pred_head)
+        ]
+
+        return torch.mean(torch.stack(code_token_losses))
+
+    def _compute_item_ce_loss(
+        self,
+        hs: torch.Tensor,
+        label_mask: torch.Tensor,
+        target_item_embs: torch.Tensor,
+    ) -> torch.Tensor:
+        selected_hs = hs.view(-1, self.hidden_size)[label_mask]
+        item_ce_logits = torch.matmul(
+            F.normalize(selected_hs, dim=-1),
+            F.normalize(target_item_embs, dim=-1).T,
+        ) / self.temperature
+        item_ce_labels = torch.arange(
+            item_ce_logits.shape[0],
+            device=item_ce_logits.device,
+        )
+
+        return F.cross_entropy(item_ce_logits, item_ce_labels)
+
     def forward(
         self,
         batch: Dict[str, torch.Tensor],
@@ -137,24 +202,26 @@ class RPGv4(AbstractModel):
         if return_loss:
             labels = batch["labels_seq"]
             label_mask = labels.view(-1) != -100
-            selected_states = final_states.view(-1, self.n_pred_head, self.hidden_size)[label_mask]
-            selected_states = F.normalize(selected_states, dim=-1)
-            selected_states_chunks = torch.chunk(selected_states, self.n_pred_head, dim=1)
-            token_emb = self.gpt2.wte.weight[1:self.eos_token]
-            token_emb = F.normalize(token_emb, dim=-1)
-            token_embs_chunks = torch.split(token_emb, self.vocab_sizes, dim=0)
-            token_logits = [
-                torch.matmul(selected_states_chunks[i].squeeze(dim=1), token_embs_chunks[i].T) / self.temperature
-                for i in range(self.n_pred_head)
-            ]
-            token_labels = self.item_id2tokens[labels.view(-1)[label_mask] + 1]
-            losses = [
-                self.loss_fct(token_logits[i], token_labels[:, i] - self.bases[i] - 1)
-                for i in range(self.n_pred_head)
-            ]
-            main_loss = torch.mean(torch.stack(losses))
-            total_loss = main_loss
-            outputs.loss = total_loss
+            target_item_ids = labels.view(-1)[label_mask] + 1
+            token_labels = self.item_id2tokens[target_item_ids]
+            target_item_embs = self._sid_mean_embeddings(token_labels)
+
+            code_token_loss = self._compute_code_token_loss(
+                final_states,
+                label_mask,
+                token_labels,
+            )
+            item_ce_loss = self._compute_item_ce_loss(
+                hs,
+                label_mask,
+                target_item_embs,
+            )
+
+            outputs.target_item_embs = target_item_embs
+            outputs.code_token_loss = code_token_loss
+            outputs.main_loss = code_token_loss
+            outputs.item_ce_loss = item_ce_loss
+            outputs.loss = code_token_loss + self.item_ce_loss_weight * item_ce_loss
         return outputs
 
     def _rank_item_ids(

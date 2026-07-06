@@ -28,6 +28,68 @@ class ResBlock(nn.Module):
         return x + self.act(self.linear(x))
 
 
+class SIDFourierPooling(nn.Module):
+    def __init__(
+        self,
+        code_len: int,
+        hidden_size: int,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.code_len = code_len
+        self.hidden_size = hidden_size
+        self.n_freq = code_len // 2 + 1
+
+        self.norm = nn.LayerNorm(hidden_size)
+
+        # Learnable frequency filter.
+        # Shape: [F, D], where F = code_len // 2 + 1.
+        # Initialized as 1, so the module starts close to identity filtering.
+        self.freq_filter = nn.Parameter(torch.ones(self.n_freq, hidden_size))
+
+        self.out_norm = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, token_emb: torch.Tensor):
+        """
+        token_emb: [B, L, K, D]
+
+        return:
+            pooled: [B, L, D]
+            freq_filter: [F, D]
+        """
+        dtype = token_emb.dtype
+
+        x = token_emb
+
+        # Fourier transform over code-depth dimension K.
+        # Use float32 for FFT stability under fp16/bf16 training.
+        x_freq = torch.fft.rfft(x.float(), dim=-2, norm="backward")  # [B, L, F, D]
+
+        # Frequency-domain filtering.
+        x_freq = x_freq * self.freq_filter.view(
+            1,
+            1,
+            self.n_freq,
+            self.hidden_size,
+        )
+
+        # Inverse Fourier transform back to code-depth dimension K.
+        x = torch.fft.irfft(
+            x_freq,
+            n=self.code_len,
+            dim=-2,
+            norm="backward",
+        ).to(dtype)  # [B, L, K, D]
+
+        pooled = F.silu(x).mean(dim=-2)  # [B, L, D]
+
+        pooled = self.out_norm(pooled)
+        # pooled = self.dropout(pooled)
+
+        return pooled, self.freq_filter
+
+
 class RPGv2(AbstractModel):
     def __init__(
         self,
@@ -90,6 +152,11 @@ class RPGv2(AbstractModel):
         )
         self.gpt2 = GPT2Model(gpt2config)
         self.norm = nn.LayerNorm(self.hidden_size)
+        self.sid_pool = SIDFourierPooling(
+            code_len=self.code_len,
+            hidden_size=self.hidden_size,
+            dropout=float(model_params.get("sid_pool_dropout", 0.1)),
+        )
         self.pred_heads = nn.Sequential(
             *[ResBlock(self.hidden_size) for _ in range(self.n_pred_head)]
         )
@@ -126,8 +193,9 @@ class RPGv2(AbstractModel):
     ) -> torch.Tensor:
         input_tokens = self.item_id2tokens[batch["input_ids"]]
         token_emb = self.gpt2.wte(input_tokens)
-        input_embs = self.norm(token_emb).mean(dim=-2)
+        # input_embs = self.norm(token_emb).mean(dim=-2)
         # input_embs = token_emb.mean(dim=-2)
+        input_embs, _ = self.sid_pool(token_emb)
         outputs = self.gpt2(inputs_embeds=input_embs, attention_mask=batch["attention_mask"])
         hs = outputs.last_hidden_state
         final_states = [self.pred_heads[i](hs).unsqueeze(-2) for i in range(self.n_pred_head)]

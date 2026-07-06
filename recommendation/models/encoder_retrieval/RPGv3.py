@@ -90,6 +90,11 @@ class RPGv3(AbstractModel):
         )
         self.gpt2 = GPT2Model(gpt2config)
         self.norm = nn.LayerNorm(self.hidden_size)
+        self.item_emb = nn.Embedding(
+            max_item_id + 1,
+            self.hidden_size,
+            padding_idx=0,
+        )
         self.pred_heads = nn.Sequential(
             *[ResBlock(self.hidden_size) for _ in range(self.n_pred_head)]
         )
@@ -112,7 +117,7 @@ class RPGv3(AbstractModel):
             p.numel()
             for p in self.gpt2.get_input_embeddings().parameters()
             if p.requires_grad
-        )
+        ) + sum(p.numel() for p in self.item_emb.parameters() if p.requires_grad)
         return (
             f"#Embedding parameters: {emb_params}\n"
             f"#Non-embedding parameters: {total_params - emb_params}\n"
@@ -127,6 +132,7 @@ class RPGv3(AbstractModel):
         input_tokens = self.item_id2tokens[batch["input_ids"]]
         token_emb = self.gpt2.wte(input_tokens)
         input_embs = self.norm(token_emb).mean(dim=-2)
+        input_embs = input_embs + self.item_emb(batch["input_ids"])
         # input_embs = token_emb.mean(dim=-2)
         outputs = self.gpt2(inputs_embeds=input_embs, attention_mask=batch["attention_mask"])
         hs = outputs.last_hidden_state
