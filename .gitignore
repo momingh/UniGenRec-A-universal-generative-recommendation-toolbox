@@ -42,6 +42,7 @@ ckpt/
 
 # Track the Beauty dataset, but keep heavyweight embeddings out of Git.
 !datasets/
+datasets/*
 !datasets/Beauty/
 !datasets/Beauty/**
 datasets/Beauty/embeddings/
