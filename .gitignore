@@ -45,6 +45,7 @@ ckpt/
 datasets/*
 !datasets/Beauty/
 !datasets/Beauty/**
+datasets/Beauty/Beauty.review.jsonl
 datasets/Beauty/embeddings/
 datasets/Beauty/embeddings/**
 
