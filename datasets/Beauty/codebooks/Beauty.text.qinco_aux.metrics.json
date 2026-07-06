@@ -1,0 +1,160 @@
+{
+  "num_items": 12101,
+  "num_layers": 16,
+  "sid": {
+    "unique_count": 12072,
+    "duplicate_count": 29,
+    "duplicate_rate": 0.0023964961573423684
+  },
+  "layers": [
+    {
+      "layer": 0,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 2.7707880779701988,
+      "normalized_entropy": 0.5710574599202669
+    },
+    {
+      "layer": 1,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 1.4086424770464534,
+      "normalized_entropy": 0.290320216574352
+    },
+    {
+      "layer": 2,
+      "codebook_size": 128,
+      "used_tokens": 127,
+      "unused_tokens": 1,
+      "utilization": 0.9921875,
+      "entropy": 3.809028172933138,
+      "normalized_entropy": 0.7850380079567125
+    },
+    {
+      "layer": 3,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.093443352436427,
+      "normalized_entropy": 0.8436557749599897
+    },
+    {
+      "layer": 4,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.09824408453092,
+      "normalized_entropy": 0.8446452024436126
+    },
+    {
+      "layer": 5,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.201297181191128,
+      "normalized_entropy": 0.8658843726578889
+    },
+    {
+      "layer": 6,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.114249898120083,
+      "normalized_entropy": 0.8479439892851096
+    },
+    {
+      "layer": 7,
+      "codebook_size": 128,
+      "used_tokens": 127,
+      "unused_tokens": 1,
+      "utilization": 0.9921875,
+      "entropy": 4.259733365582506,
+      "normalized_entropy": 0.8779280288621623
+    },
+    {
+      "layer": 8,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.314721486565101,
+      "normalized_entropy": 0.8892610416406468
+    },
+    {
+      "layer": 9,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.223931032542633,
+      "normalized_entropy": 0.870549193386608
+    },
+    {
+      "layer": 10,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.350058378343098,
+      "normalized_entropy": 0.8965439500018677
+    },
+    {
+      "layer": 11,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.334155766819025,
+      "normalized_entropy": 0.8932664330328729
+    },
+    {
+      "layer": 12,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.334581827021713,
+      "normalized_entropy": 0.893354243738807
+    },
+    {
+      "layer": 13,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.262094974896127,
+      "normalized_entropy": 0.8784147548686305
+    },
+    {
+      "layer": 14,
+      "codebook_size": 128,
+      "used_tokens": 127,
+      "unused_tokens": 1,
+      "utilization": 0.9921875,
+      "entropy": 4.281737856564447,
+      "normalized_entropy": 0.882463138864581
+    },
+    {
+      "layer": 15,
+      "codebook_size": 128,
+      "used_tokens": 128,
+      "unused_tokens": 0,
+      "utilization": 1.0,
+      "entropy": 4.320579967191261,
+      "normalized_entropy": 0.8904684703472904
+    }
+  ],
+  "averages": {
+    "utilization": 0.99853515625,
+    "entropy": 3.9485804937346414,
+    "normalized_entropy": 0.8137996424088374
+  }
+}

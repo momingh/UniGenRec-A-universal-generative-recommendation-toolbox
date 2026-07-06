@@ -1,0 +1,160 @@
+{
+  "num_items": 12101,
+  "num_layers": 16,
+  "sid": {
+    "unique_count": 12046,
+    "duplicate_count": 55,
+    "duplicate_rate": 0.004545078919097595
+  },
+  "layers": [
+    {
+      "layer": 0,
+      "codebook_size": 256,
+      "used_tokens": 168,
+      "unused_tokens": 88,
+      "utilization": 0.65625,
+      "entropy": 4.200724645503291,
+      "normalized_entropy": 0.7575455767759559
+    },
+    {
+      "layer": 1,
+      "codebook_size": 256,
+      "used_tokens": 148,
+      "unused_tokens": 108,
+      "utilization": 0.578125,
+      "entropy": 4.374783248389468,
+      "normalized_entropy": 0.7889347621769495
+    },
+    {
+      "layer": 2,
+      "codebook_size": 256,
+      "used_tokens": 147,
+      "unused_tokens": 109,
+      "utilization": 0.57421875,
+      "entropy": 4.3678246538285315,
+      "normalized_entropy": 0.7876798709438719
+    },
+    {
+      "layer": 3,
+      "codebook_size": 256,
+      "used_tokens": 168,
+      "unused_tokens": 88,
+      "utilization": 0.65625,
+      "entropy": 4.404156608044714,
+      "normalized_entropy": 0.7942318622155583
+    },
+    {
+      "layer": 4,
+      "codebook_size": 256,
+      "used_tokens": 166,
+      "unused_tokens": 90,
+      "utilization": 0.6484375,
+      "entropy": 4.324776621156058,
+      "normalized_entropy": 0.7799167230367966
+    },
+    {
+      "layer": 5,
+      "codebook_size": 256,
+      "used_tokens": 105,
+      "unused_tokens": 151,
+      "utilization": 0.41015625,
+      "entropy": 4.043649677377885,
+      "normalized_entropy": 0.7292191670806664
+    },
+    {
+      "layer": 6,
+      "codebook_size": 256,
+      "used_tokens": 30,
+      "unused_tokens": 226,
+      "utilization": 0.1171875,
+      "entropy": 3.0701834119209748,
+      "normalized_entropy": 0.5536672978747436
+    },
+    {
+      "layer": 7,
+      "codebook_size": 256,
+      "used_tokens": 15,
+      "unused_tokens": 241,
+      "utilization": 0.05859375,
+      "entropy": 2.4508945302376355,
+      "normalized_entropy": 0.4419866730644653
+    },
+    {
+      "layer": 8,
+      "codebook_size": 256,
+      "used_tokens": 15,
+      "unused_tokens": 241,
+      "utilization": 0.05859375,
+      "entropy": 2.48570375551318,
+      "normalized_entropy": 0.4482640601497422
+    },
+    {
+      "layer": 9,
+      "codebook_size": 256,
+      "used_tokens": 16,
+      "unused_tokens": 240,
+      "utilization": 0.0625,
+      "entropy": 2.502065224477124,
+      "normalized_entropy": 0.45121463641673476
+    },
+    {
+      "layer": 10,
+      "codebook_size": 256,
+      "used_tokens": 15,
+      "unused_tokens": 241,
+      "utilization": 0.05859375,
+      "entropy": 2.5482405054552646,
+      "normalized_entropy": 0.45954174252658697
+    },
+    {
+      "layer": 11,
+      "codebook_size": 256,
+      "used_tokens": 17,
+      "unused_tokens": 239,
+      "utilization": 0.06640625,
+      "entropy": 2.5876513836052246,
+      "normalized_entropy": 0.4666489773345903
+    },
+    {
+      "layer": 12,
+      "codebook_size": 256,
+      "used_tokens": 19,
+      "unused_tokens": 237,
+      "utilization": 0.07421875,
+      "entropy": 2.54722294800846,
+      "normalized_entropy": 0.4593582393912964
+    },
+    {
+      "layer": 13,
+      "codebook_size": 256,
+      "used_tokens": 16,
+      "unused_tokens": 240,
+      "utilization": 0.0625,
+      "entropy": 2.567089105812549,
+      "normalized_entropy": 0.462940840309481
+    },
+    {
+      "layer": 14,
+      "codebook_size": 256,
+      "used_tokens": 20,
+      "unused_tokens": 236,
+      "utilization": 0.078125,
+      "entropy": 2.6040966888288724,
+      "normalized_entropy": 0.46961467237109805
+    },
+    {
+      "layer": 15,
+      "codebook_size": 256,
+      "used_tokens": 20,
+      "unused_tokens": 236,
+      "utilization": 0.078125,
+      "entropy": 2.6496310424189047,
+      "normalized_entropy": 0.4778261956354011
+    }
+  ],
+  "averages": {
+    "utilization": 0.264892578125,
+    "entropy": 3.233043378161134,
+    "normalized_entropy": 0.5830369560814961
+  }
+}
