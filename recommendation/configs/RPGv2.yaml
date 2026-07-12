@@ -19,7 +19,7 @@ model_params:
 
   # SIDFourierPooling
   sid_pool_dropout: 0.0
-  sid_pool_filter_scale: 0.5
+  sid_pool_filter_scale: 0.6
   sid_pool_hyper_hidden_size: 448
 
 # ✨ 范例：如果 RPGv2 需要不同的 batch size，可以在这里覆盖 base.yaml
