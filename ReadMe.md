@@ -2,5 +2,5 @@
 
 ```bash
 cd recommendation
-python main.py --model RPG --dataset Beauty --quant_method rqvae_faiss --embedding_modality graph-lightgcn
+python main.py --model RPG --dataset Beauty --quant_method rqkmeans_plus --embedding_modality graph-lightgcn
 ```
