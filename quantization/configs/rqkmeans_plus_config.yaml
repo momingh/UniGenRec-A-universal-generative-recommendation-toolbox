@@ -13,11 +13,11 @@ rqkmeans_plus:
     # 残差修正网络 f(x) 的隐藏层；encoder 输出为 z = x + f(x)。
     hidden_sizes: [512, 256]
     # 残差量化层数；最终每个 item 得到 num_levels 个 code。
-    num_levels: 4
+    num_levels: 16
     # Trainer 去重层使用的兼容字段；当前要求每层 codebook 大小一致。
-    codebook_size: 256
+    codebook_size: 128
     # 每层 RQ codebook 的大小；长度必须等于 num_levels，每个值必须是 2 的幂。
-    codebook_sizes: [256, 256, 256, 256]
+    codebook_sizes: [128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128]
     # 是否在预测码本时追加一层去重 ID。
     has_dup_layer: true
     # 可选：MiniOneRec 风格的 .npz 文件，键名为 codebook_0、codebook_1、...
@@ -30,7 +30,7 @@ rqkmeans_plus:
     # 是否在隐藏层使用 BatchNorm1d。
     bn: false
     # Sinkhorn 分配 epsilon；0 表示使用 argmin 最近邻。
-    sk_epsilons: [0.0, 0.0, 0.0, 0.0]
+    sk_epsilons: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     # Sinkhorn 分配迭代次数。
     sk_iters: 100
 

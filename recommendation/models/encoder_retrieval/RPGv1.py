@@ -28,59 +28,66 @@ class ResBlock(nn.Module):
         return x + self.act(self.linear(x))
 
 
-class SIDGatedPooling(nn.Module):
+class SIDFourierPooling(nn.Module):
     def __init__(
         self,
         code_len: int,
         hidden_size: int,
         dropout: float = 0.1,
-        init_as_mean: bool = True,
     ):
         super().__init__()
         self.code_len = code_len
         self.hidden_size = hidden_size
-        self.init_as_mean = init_as_mean
+        self.n_freq = code_len // 2 + 1
 
-        self.depth_emb = nn.Parameter(torch.randn(code_len, hidden_size) * 0.02)
+        self.norm = nn.LayerNorm(hidden_size)
 
-        self.sid_norm = nn.LayerNorm(hidden_size)
-        self.value = nn.Linear(hidden_size, hidden_size)
-
-        self.gate = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.SiLU(),
-            nn.Linear(hidden_size, 1),
-        )
+        # Learnable frequency filter.
+        # Shape: [F, D], where F = code_len // 2 + 1.
+        # Initialized as 1, so the module starts close to identity filtering.
+        self.freq_filter = nn.Parameter(torch.ones(self.n_freq, hidden_size))
 
         self.out_norm = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout)
 
-        self.mix_logit = nn.Parameter(torch.tensor(-2.0))
-
     def forward(self, token_emb: torch.Tensor):
         """
         token_emb: [B, L, K, D]
+
         return:
             pooled: [B, L, D]
-            weights: [B, L, K]
+            freq_filter: [F, D]
         """
-        mean_pooled = token_emb.mean(dim=-2)
+        dtype = token_emb.dtype
 
-        x = token_emb + self.depth_emb.view(1, 1, self.code_len, self.hidden_size)
-        x = self.sid_norm(x)
+        x = token_emb
 
-        gate_logits = self.gate(x).squeeze(-1)
-        weights = torch.softmax(gate_logits, dim=-1)
+        # Fourier transform over code-depth dimension K.
+        # Use float32 for FFT stability under fp16/bf16 training.
+        x_freq = torch.fft.rfft(x.float(), dim=-2, norm="backward")  # [B, L, F, D]
 
-        v = self.value(x)
-        gated_pooled = torch.sum(weights.unsqueeze(-1) * v, dim=-2)
-        gated_pooled = self.out_norm(gated_pooled)
-        gated_pooled = self.dropout(gated_pooled)
+        # Frequency-domain filtering.
+        x_freq = x_freq * self.freq_filter.view(
+            1,
+            1,
+            self.n_freq,
+            self.hidden_size,
+        )
 
-        mix = torch.sigmoid(self.mix_logit)
-        pooled = (1.0 - mix) * mean_pooled + mix * gated_pooled
+        # Inverse Fourier transform back to code-depth dimension K.
+        x = torch.fft.irfft(
+            x_freq,
+            n=self.code_len,
+            dim=-2,
+            norm="backward",
+        ).to(dtype)  # [B, L, K, D]
 
-        return pooled, weights
+        pooled = F.silu(x).mean(dim=-2)  # [B, L, D]
+
+        pooled = self.out_norm(pooled)
+        # pooled = self.dropout(pooled)
+
+        return pooled, self.freq_filter
 
 
 class RPGv1(AbstractModel):
@@ -145,7 +152,7 @@ class RPGv1(AbstractModel):
         )
         self.gpt2 = GPT2Model(gpt2config)
         self.norm = nn.LayerNorm(self.hidden_size)
-        self.sid_pool = SIDGatedPooling(
+        self.sid_pool = SIDFourierPooling(
             code_len=self.code_len,
             hidden_size=self.hidden_size,
             dropout=float(model_params.get("sid_pool_dropout", 0.1)),
@@ -156,7 +163,7 @@ class RPGv1(AbstractModel):
         self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
 
         logger.info(
-            "RPGv1 initialized: items=%d, code_len=%d.",
+            "RPG1 initialized: items=%d, code_len=%d.",
             self.item_id2tokens.shape[0] - 1,
             self.code_len,
         )
@@ -186,7 +193,8 @@ class RPGv1(AbstractModel):
     ) -> torch.Tensor:
         input_tokens = self.item_id2tokens[batch["input_ids"]]
         token_emb = self.gpt2.wte(input_tokens)
-        token_emb = self.norm(token_emb)
+        # input_embs = self.norm(token_emb).mean(dim=-2)
+        # input_embs = token_emb.mean(dim=-2)
         input_embs, _ = self.sid_pool(token_emb)
         outputs = self.gpt2(inputs_embeds=input_embs, attention_mask=batch["attention_mask"])
         hs = outputs.last_hidden_state
